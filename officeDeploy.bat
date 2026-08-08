@@ -20,6 +20,12 @@ set "_log=%_logDir%\office-deploy.log"
 :: Stable CLI exit codes: 2 arguments, 10 admin, 20 environment, 30/31 ODT,
 :: 40 configuration, 50 install, 60 verification, 70 internal.
 
+:: Capture the batch file's own path before :parse_args. The argument
+:: parser below uses bare `shift`, which in CMD also shifts %0, so by the
+:: time we consume %~f0 again (logging, Sysnative/SysArm32 relaunch) %0
+:: would hold the last shifted argument instead of the script path.
+set "_self=%~f0"
+
 :parse_args
 if "%~1"=="" goto args_parsed
 if /i "%~1"=="--unattended" (set "_mode=unattended"&shift&goto parse_args)
@@ -61,7 +67,7 @@ if /i "%_mode%"=="unattended" (
     call :log "LOG_INIT_EXIT_CODE=!_logInitExit!"
     call :log "MODE=UNATTENDED"
     call :log "CONFIG_ONLY=%_configOnly%"
-    call :log "SCRIPT_PATH=%~f0"
+    call :log "SCRIPT_PATH=%_self%"
     for /f "delims=" %%V in ('ver') do call :log "WINDOWS_VERSION=%%V"
     call :log "PROCESSOR_ARCHITECTURE=%PROCESSOR_ARCHITECTURE%"
     call :log "NATIVE_RELAUNCH=%_nativeRelaunch%"
@@ -85,7 +91,7 @@ if "%_configOnly%"=="1" set "_childArgs=!_childArgs! --config-only"
 if "%_re1%"=="1" set "_childArgs=!_childArgs! re1"
 if "%_re2%"=="1" set "_childArgs=!_childArgs! re2"
 if "%_configOnly%"=="0" if exist "%SystemRoot%\Sysnative\cmd.exe" if "%_re1%"=="0" (
-    "%SystemRoot%\Sysnative\cmd.exe" /d /s /c ""%~f0" !_childArgs! re1"
+    "%SystemRoot%\Sysnative\cmd.exe" /d /s /c ""%_self%" !_childArgs! re1"
     set "_nativeExit=!ERRORLEVEL!"
     for %%E in ("!_nativeExit!") do (
         endlocal
@@ -93,7 +99,7 @@ if "%_configOnly%"=="0" if exist "%SystemRoot%\Sysnative\cmd.exe" if "%_re1%"=="
     )
 )
 if "%_configOnly%"=="0" if exist "%SystemRoot%\SysArm32\cmd.exe" if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" if "%_re2%"=="0" (
-    "%SystemRoot%\SysArm32\cmd.exe" /d /s /c ""%~f0" !_childArgs! re2"
+    "%SystemRoot%\SysArm32\cmd.exe" /d /s /c ""%_self%" !_childArgs! re2"
     set "_nativeExit=!ERRORLEVEL!"
     for %%E in ("!_nativeExit!") do (
         endlocal

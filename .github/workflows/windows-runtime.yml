@@ -128,7 +128,13 @@ jobs:
           findstr /c:"ADMIN_CHECK=SKIPPED" "%LOG%" >nul || ( echo [T6] FAIL: no ADMIN_CHECK=SKIPPED & exit /b 1 )
           findstr /c:"RESULT=SUCCESS" "%LOG%" >nul || ( echo [T6] FAIL: no RESULT=SUCCESS & exit /b 1 )
           findstr /c:"EXIT_CODE=0" "%LOG%" >nul || ( echo [T6] FAIL: no EXIT_CODE=0 & exit /b 1 )
-          echo [T6] PASS log-markers-ok
+
+          :: Regression (Runtime-discovered bug): bare `shift` in :parse_args
+          :: used to corrupt %0/%~f0, making SCRIPT_PATH log as "...\<arg>"
+          :: instead of the script path. SCRIPT_PATH must point at the BAT.
+          findstr /c:"SCRIPT_PATH=%ROOT%\config-only\officeDeploy.bat" "%LOG%" >nul || ( echo [T6] FAIL: SCRIPT_PATH not the script path & exit /b 1 )
+          findstr /c:"--unattended" "%LOG%" >nul && ( echo [T6] FAIL: arg leaked into a path in log & exit /b 1 )
+          echo [T6] PASS log-markers-ok SCRIPT_PATH-ok
 
           exit /b 0
 
