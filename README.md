@@ -47,7 +47,7 @@ The interactive mode displays an action menu:
 ```
 
 - `[1] Install` performs the normal interactive Microsoft 365 installation flow.
-- `[2] Activate installed Office` only acts on Office that is already installed. It detects the installed Office, reports its license state, and activates it by reusing the script's existing Ohook activation capability — the same implementation the `[1]` post-install path uses. It does not download or reinstall Office.
+- `[2] Activate installed Office` only acts on Office that is already installed. It detects the installed Office (both 64-bit and 32-bit registry views), reports its license state per product, and activates it by reusing the script's existing Ohook activation capability — the same implementation the `[1]` post-install path uses. It does not download or reinstall Office. The already-activated early exit only triggers when **every** detected Office product is licensed, so one licensed SKU cannot mask an unlicensed one.
 
 > Both activation paths (`[1]` post-install and `[2]` Activate installed Office) share the repository's existing MAS-derived Ohook activation implementation. GitHub Actions does not execute Office activation.
 >
@@ -364,7 +364,8 @@ Coverage includes:
 - WOW64 → `Sysnative` relaunch;
 - native child → parent exit-code propagation;
 - native child `SCRIPT_PATH` preservation;
-- interactive menu rendering and Exit mapping (`T11`).
+- interactive menu rendering and Exit mapping (`T11`);
+- option `[2]` read-only detection and license classification against mocked registry fixtures, including the 32-bit `Wow6432Node` view (`T12`, stopped at a test seam before Ohook — no activation is executed).
 
 See:
 
@@ -384,6 +385,8 @@ The runtime workflow intentionally does **not**:
 - execute the activation path;
 - execute Ohook;
 - test ARM64 / `SysArm32`.
+
+`T12` exercises option `[2]` only up to the `OFFICE_DEPLOY_TEST_DETECT_ONLY` test seam (an environment variable that makes the option report its read-only detection/license results and exit before invoking Ohook). Activation itself stays outside the CI boundary.
 
 These belong to separate validation stages.
 

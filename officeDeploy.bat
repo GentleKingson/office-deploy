@@ -279,14 +279,32 @@ echo   Type        : !_aoType!
 echo   Version     : !_aoVersion!
 if defined _aoPlatform    echo   Architecture: !_aoPlatform!
 if defined _aoInstallPath echo   Install path: !_aoInstallPath!
+if defined _aoProductIds  echo   Products    : !_aoProductIds!
 echo.
 call :get_office_license_status
 set "_licenseExit=!ERRORLEVEL!"
 echo License status: !_aoLicenseState!
-if defined _aoGraceEnd    echo   License ends: !_aoGraceEnd!
+if defined _aoOfficeCount   echo   Office licenses: !_aoLicensedCount!/!_aoOfficeCount! activated
+if defined _aoGraceEnd      echo   License ends: !_aoGraceEnd!
 echo.
 if /i "!_aoLicenseState!"=="LICENSED" (
     echo Microsoft Office is already activated.
+    goto finish
+)
+:: PARTIALLY_LICENSED means at least one Office product is still unlicensed
+:: (e.g. Office + Project/Visio, multiple versions, or leftover license
+:: objects); do NOT let the licensed product mask the rest -- run Ohook so
+:: every detected product ends up activated.
+if /i "!_aoLicenseState!"=="PARTIALLY_LICENSED" (
+    echo Some Office products are licensed but at least one is not.
+    echo Activating the remaining products below.
+)
+:: CI test seam: with OFFICE_DEPLOY_TEST_DETECT_ONLY=1 the option reports the
+:: read-only detection/license results and exits without invoking Ohook.
+:: This lets Windows Runtime CI exercise the [2] control flow against mocked
+:: registry fixtures without ever executing activation.
+if /i "%OFFICE_DEPLOY_TEST_DETECT_ONLY%"=="1" (
+    echo TEST_DETECT_ONLY=1
     goto finish
 )
 :: Reuse the script's existing Ohook activation (the same capability the
@@ -319,32 +337,45 @@ set "_aoType="
 set "_aoVersion="
 set "_aoPlatform="
 set "_aoInstallPath="
+set "_aoProductIds="
 set "_aoDetectOut=%TEMP%\office-deploy-detect-!RANDOM!.txt"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$keys=@('HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\WOW64Node\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration','HKLM:\SOFTWARE\WOW64Node\Microsoft\Office\15.0\ClickToRun\Configuration'); $c=$null; foreach($k in $keys){try{$c=Get-ItemProperty -LiteralPath $k -ErrorAction Stop;break}catch{}}; if($null -ne $c){$p=[string]$c.InstallationPath; $v=[string]$c.VersionToReport; $a=[string]$c.Platform; $ids=[string]$c.ProductReleaseIds; if(-not [string]::IsNullOrWhiteSpace($v)){ 'AO_TYPE=ClickToRun'; 'AO_VERSION='+$v; 'AO_PLATFORM='+$a; 'AO_INSTALLPATH='+$p; 'AO_PRODUCTIDS='+$ids; exit 0 }}; $msi=@{16='HKLM:\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot';15='HKLM:\SOFTWARE\Microsoft\Office\15.0\Common\InstallRoot';14='HKLM:\SOFTWARE\Microsoft\Office\14.0\Common\InstallRoot'}; foreach($ver in $msi.Keys){try{$r=Get-ItemProperty -LiteralPath $msi[$ver] -Name Path -ErrorAction Stop}catch{$r=$null}; if($null -ne $r -and -not [string]::IsNullOrWhiteSpace($r.Path)){'AO_TYPE=MSI'; 'AO_VERSION='+$ver+'.0'; 'AO_PLATFORM='; 'AO_INSTALLPATH='+$r.Path; exit 0}}; exit 1" > "%_aoDetectOut%" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$keys=@('HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\15.0\ClickToRun\Configuration'); $c=$null; foreach($k in $keys){try{$c=Get-ItemProperty -LiteralPath $k -ErrorAction Stop;break}catch{}}; if($null -ne $c){$p=[string]$c.InstallationPath; $v=[string]$c.VersionToReport; $a=[string]$c.Platform; $ids=[string]$c.ProductReleaseIds; if(-not [string]::IsNullOrWhiteSpace($v)){ 'AO_TYPE=ClickToRun'; 'AO_VERSION='+$v; 'AO_PLATFORM='+$a; 'AO_INSTALLPATH='+$p; 'AO_PRODUCTIDS='+$ids; exit 0 }}; $msi=@('HKLM:\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot','HKLM:\SOFTWARE\Microsoft\Office\15.0\Common\InstallRoot','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\15.0\Common\InstallRoot','HKLM:\SOFTWARE\Microsoft\Office\14.0\Common\InstallRoot','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\14.0\Common\InstallRoot'); foreach($r in $msi){try{$v=Get-ItemProperty -LiteralPath $r -Name Path -ErrorAction Stop}catch{$v=$null}; if($null -ne $v -and -not [string]::IsNullOrWhiteSpace($v.Path)){if($r -match 'Office\\(14|15|16)\.0\\Common\\InstallRoot'){'AO_TYPE=MSI'; 'AO_VERSION='+$Matches[1]+'.0'; 'AO_PLATFORM='; 'AO_INSTALLPATH='+$v.Path; exit 0}}}; exit 1" > "%_aoDetectOut%" 2>nul
 set "_detectCmdExit=!ERRORLEVEL!"
 if exist "%_aoDetectOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_aoDetectOut%") do (
     if /i "%%A"=="AO_TYPE" set "_aoType=%%B"
     if /i "%%A"=="AO_VERSION" set "_aoVersion=%%B"
     if /i "%%A"=="AO_PLATFORM" set "_aoPlatform=%%B"
     if /i "%%A"=="AO_INSTALLPATH" set "_aoInstallPath=%%B"
+    if /i "%%A"=="AO_PRODUCTIDS" set "_aoProductIds=%%B"
 )
 del /q "%_aoDetectOut%" >nul 2>nul
 exit /b %_detectCmdExit%
 
 ::========================================================================
 ::  Read-only Office license-status detector for :activate_existing.
-::  Sets: _aoLicenseState, _aoGraceEnd
+::  Sets: _aoLicenseState, _aoLicensedCount, _aoOfficeCount, _aoGraceEnd
 ::  Exit 0 always (status determined, even if UNABLE_TO_DETERMINE).
-::  Uses only Microsoft's own Software Licensing / Office Software Protection
-::  components in read-only mode. It writes no registry, installs no product
-::  key, clears no license, modifies no token, and modifies no Office file.
+::  Classifies EVERY SoftwareLicensingProduct that belongs to the Office
+::  ApplicationID and carries a partial product key, then derives the state
+::  from the whole detected set (not from any single product), so one
+::  licensed SKU cannot mask another unlicensed one:
+::    all licensed               -> LICENSED
+::    some licensed              -> PARTIALLY_LICENSED
+::    none licensed              -> UNLICENSED
+::  Uses only Microsoft's own Software Licensing components in read-only
+::  mode. It writes no registry, installs no product key, clears no
+::  license, modifies no token, and modifies no Office file.
 :get_office_license_status
 set "_aoLicenseState=UNABLE_TO_DETERMINE"
+set "_aoLicensedCount=0"
+set "_aoOfficeCount=0"
 set "_aoGraceEnd="
 set "_aoLicOut=%TEMP%\office-deploy-license-!RANDOM!.txt"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$appId='0ff1ce15-a989-479d-af46-f275c6370663'; $state='UNABLE_TO_DETERMINE'; $grace=''; $have=$false; try { $prods = @(); try { $prods = Get-WmiObject SoftwareLicensingProduct -ErrorAction Stop | Where-Object { $_.ApplicationID -eq $appId -and $null -ne $_.PartialProductKey } } catch {}; if($prods.Count -gt 0){$have=$true; $lic=$null; foreach($p in $prods){ if($p.LicenseStatus -eq 1){ $lic=$p; break } }; if($null -ne $lic){ $state='LICENSED' } else { $sub=$false; foreach($p in $prods){ if($p.Name -match 'Subscription|365'){ $sub=$true } }; if($sub){ $state='SUBSCRIPTION_SIGNIN_REQUIRED' } else { $state='UNLICENSED'; try { $g=$prods[0].GracePeriodRemaining; if($g -gt 0){ $days=[math]::Floor($g/1440); $grace='~'+$days+' day(s) remaining' } } catch {} } } } } catch {}; if(-not $have){ try { if(Test-Path 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\Tokens\Sku') { $have=$true; $state='UNLICENSED' } } catch {} }; 'AO_LICENSE_STATE='+$state; 'AO_GRACE_END='+$grace; exit 0" > "%_aoLicOut%" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$appId='0ff1ce15-a989-479d-af46-f275c6370663'; $state='UNABLE_TO_DETERMINE'; $grace=''; $licensed=0; $count=0; try { $prods = Get-WmiObject SoftwareLicensingProduct -ErrorAction Stop | Where-Object { $_.ApplicationID -eq $appId -and $null -ne $_.PartialProductKey }; foreach($p in $prods){ $count=$count+1; if($p.LicenseStatus -eq 1){ $licensed=$licensed+1 } else { try { $g=$p.GracePeriodRemaining; if($g -gt 0){ $days=[math]::Floor($g/1440); $grace='~'+$days+' day(s) remaining' } } catch {} } } } catch { $state='UNABLE_TO_DETERMINE' }; if($count -gt 0){ if($licensed -eq $count){ $state='LICENSED' } else { if($licensed -gt 0){ $state='PARTIALLY_LICENSED' } else { $state='UNLICENSED' } } } else { try { if(Test-Path 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\Tokens\Sku'){ $state='UNLICENSED' } } catch {} }; 'AO_LICENSE_STATE='+$state; 'AO_LICENSED_COUNT='+$licensed; 'AO_OFFICE_COUNT='+$count; 'AO_GRACE_END='+$grace; exit 0" > "%_aoLicOut%" 2>nul
 if exist "%_aoLicOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_aoLicOut%") do (
     if /i "%%A"=="AO_LICENSE_STATE" set "_aoLicenseState=%%B"
+    if /i "%%A"=="AO_LICENSED_COUNT" set "_aoLicensedCount=%%B"
+    if /i "%%A"=="AO_OFFICE_COUNT" set "_aoOfficeCount=%%B"
     if /i "%%A"=="AO_GRACE_END" set "_aoGraceEnd=%%B"
 )
 del /q "%_aoLicOut%" >nul 2>nul

@@ -9,6 +9,10 @@ name: Windows Runtime CI
 # officeDeploy.bat. T9 / T10 are terminated deterministically inside
 # :ensure_odt before any network call by using the script's own
 # stale-temporary-cleanup branch as a fault-injection point.
+# T12 is the only test that enters the interactive option [2] path; it
+# stops at the OFFICE_DEPLOY_TEST_DETECT_ONLY seam before :oh_activate_core,
+# so the read-only detection / license classification runs against mocked
+# registry fixtures but no Ohook activation is ever executed.
 
 on:
   pull_request:
@@ -398,6 +402,69 @@ jobs:
           findstr /b /c:":activate_existing" "%ROOT%\interactive\officeDeploy.bat" >nul || ( echo [T11] FAIL: :activate_existing label missing & exit /b 1 )
 
           echo [T11] PASS interactive-menu-rendered exit-mapping=0 no-install no-activation
+          exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T12: option [2] "Activate installed Office" read-only control flow.
+      # The only test that executes option [2]. It drives
+      # :detect_office_installation and :get_office_license_status against
+      # mocked registry fixtures (64-bit Click-to-Run view, then the 32-bit
+      # Wow6432Node MSI view), then stops at the OFFICE_DEPLOY_TEST_DETECT_ONLY
+      # test seam BEFORE :oh_activate_core -- so no Ohook and no licensing
+      # mutation can happen in CI. Also guards the Wow6432Node spelling so the
+      # 32-bit-detection regression cannot silently return.
+      # ----------------------------------------------------------------------
+      - name: T12 option [2] detection (read-only, mocked registry)
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\activate-detect" >nul 2>nul
+          mkdir "%ROOT%\activate-detect\temp" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\activate-detect\officeDeploy.bat" >nul
+          set "TEMP=%ROOT%\activate-detect\temp"
+          set "TMP=%ROOT%\activate-detect\temp"
+          set "OFFICE_DEPLOY_TEST_DETECT_ONLY=1"
+
+          :: ---- Scenario A: 64-bit Click-to-Run fixture ----
+          reg delete "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f >nul 2>nul
+          reg delete "HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration" /f >nul 2>nul
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v InstallationPath /t REG_SZ /d "C:\OfficeFixture\root" >nul || ( echo [T12a] FAIL: reg add InstallationPath & exit /b 1 )
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v VersionToReport /t REG_SZ /d "16.0.18025.10102" >nul || ( echo [T12a] FAIL: reg add VersionToReport & exit /b 1 )
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v Platform /t REG_SZ /d "x64" >nul || ( echo [T12a] FAIL: reg add Platform & exit /b 1 )
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v ProductReleaseIds /t REG_SZ /d "O365ProPlusRetail,zh-cn" >nul || ( echo [T12a] FAIL: reg add ProductReleaseIds & exit /b 1 )
+
+          echo 2| call "%ROOT%\activate-detect\officeDeploy.bat" > "%ROOT%\activate-detect\a.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T12a] FAIL: expected exit 0, got !RC! & type "%ROOT%\activate-detect\a.out" & exit /b 1 )
+          findstr /c:"Type        : ClickToRun" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: ClickToRun type missing & type "%ROOT%\activate-detect\a.out" & exit /b 1 )
+          findstr /c:"Version     : 16.0.18025.10102" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: version missing & exit /b 1 )
+          findstr /c:"Architecture: x64" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: platform missing & exit /b 1 )
+          findstr /c:"Products    : O365ProPlusRetail,zh-cn" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: product ids missing & exit /b 1 )
+          findstr /c:"License status: UNLICENSED" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: expected UNLICENSED & exit /b 1 )
+          findstr /c:"TEST_DETECT_ONLY=1" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: test seam not reached & exit /b 1 )
+          findstr /c:"Activating your Office" "%ROOT%\activate-detect\a.out" >nul && ( echo [T12a] FAIL: reached Ohook activation & exit /b 1 )
+          echo [T12a] PASS clicktorun-x64 detect=ok license=UNLICENSED no-ohook
+
+          :: ---- Scenario B: 32-bit MSI fixture (Wow6432Node view) ----
+          reg delete "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f >nul 2>nul
+          reg add "HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot" /f /v Path /t REG_SZ /d "C:\Office16-x86" >nul || ( echo [T12b] FAIL: reg add MSI root & exit /b 1 )
+
+          echo 2| call "%ROOT%\activate-detect\officeDeploy.bat" > "%ROOT%\activate-detect\b.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T12b] FAIL: expected exit 0, got !RC! & type "%ROOT%\activate-detect\b.out" & exit /b 1 )
+          findstr /c:"Type        : MSI" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: MSI type missing & type "%ROOT%\activate-detect\b.out" & exit /b 1 )
+          findstr /c:"Version     : 16.0" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: MSI version missing & exit /b 1 )
+          findstr /c:"License status: UNLICENSED" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: expected UNLICENSED & exit /b 1 )
+          findstr /c:"TEST_DETECT_ONLY=1" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: test seam not reached & exit /b 1 )
+          findstr /c:"Activating your Office" "%ROOT%\activate-detect\b.out" >nul && ( echo [T12b] FAIL: reached Ohook activation & exit /b 1 )
+          echo [T12b] PASS msi-x86-wow6432node detect=ok license=UNLICENSED no-ohook
+
+          :: ---- Static guards: Wow6432Node spelling must not regress ----
+          findstr /c:"WOW64Node\Microsoft" "%ROOT%\activate-detect\officeDeploy.bat" >nul && ( echo [T12] FAIL: WOW64Node typo present & exit /b 1 )
+          findstr /c:"Wow6432Node\Microsoft" "%ROOT%\activate-detect\officeDeploy.bat" >nul || ( echo [T12] FAIL: Wow6432Node key missing & exit /b 1 )
+          echo [T12] PASS wow6432node-spelling-guard
+
           exit /b 0
 
       - name: Upload runtime-contract artifacts
