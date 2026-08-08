@@ -13,6 +13,7 @@ set "_nativeRelaunch=0"
 set "_re1=0"
 set "_re2=0"
 set "_setup=%~dp0setup.exe"
+set "_setupTmp=%~dp0setup.exe.download.tmp"
 set "_cfg=%~dp0Configuration.xml"
 set "_logDir=%TEMP%\office-deploy"
 set "_log=%_logDir%\office-deploy.log"
@@ -86,12 +87,18 @@ if "%_re2%"=="1" set "_childArgs=!_childArgs! re2"
 if "%_configOnly%"=="0" if exist "%SystemRoot%\Sysnative\cmd.exe" if "%_re1%"=="0" (
     "%SystemRoot%\Sysnative\cmd.exe" /d /s /c ""%~f0" !_childArgs! re1"
     set "_nativeExit=!ERRORLEVEL!"
-    endlocal&exit /b !_nativeExit!
+    for %%E in ("!_nativeExit!") do (
+        endlocal
+        exit /b %%~E
+    )
 )
 if "%_configOnly%"=="0" if exist "%SystemRoot%\SysArm32\cmd.exe" if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" if "%_re2%"=="0" (
     "%SystemRoot%\SysArm32\cmd.exe" /d /s /c ""%~f0" !_childArgs! re2"
     set "_nativeExit=!ERRORLEVEL!"
-    endlocal&exit /b !_nativeExit!
+    for %%E in ("!_nativeExit!") do (
+        endlocal
+        exit /b %%~E
+    )
 )
 
 cls
@@ -174,38 +181,10 @@ if "%_configOnly%"=="1" goto finish
 
 set "_stage=DOWNLOAD"
 if /i "%_mode%"=="unattended" call :log "STAGE=!_stage!"
-set "_downloadExit=0"
-if not exist "%_setup%" (
-    echo setup.exe not found. Downloading from Microsoft CDN...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://officecdn.microsoft.com/pr/wsus/setup.exe' -OutFile ([Environment]::GetEnvironmentVariable('_setup')); exit 0 } catch { Write-Error $_; exit 1 }"
-    set "_downloadExit=!ERRORLEVEL!"
-    if /i "%_mode%"=="unattended" call :log "DOWNLOAD_EXIT_CODE=!_downloadExit!"
-    if not "!_downloadExit!"=="0" (
-        echo Failed to download setup.exe
-        set "_exitCode=30"
-        set "_result=FAILED"
-        goto finish
-    )
-    echo setup.exe downloaded successfully.
- ) else if /i "%_mode%"=="unattended" call :log "DOWNLOAD_EXIT_CODE=0"
-if not exist "%_setup%" (
-    set "_exitCode=31"
-    set "_result=FAILED"
-    goto finish
-)
-for %%A in ("%_setup%") do set "_setupSize=%%~zA"
-if not defined _setupSize set "_setupSize=0"
-if !_setupSize! LEQ 0 (
-    echo setup.exe is empty.
-    set "_exitCode=31"
-    set "_result=FAILED"
-    goto finish
-)
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=Get-AuthenticodeSignature -LiteralPath ([Environment]::GetEnvironmentVariable('_setup')); if ($s.Status -eq 'Valid') { exit 0 } else { Write-Error ('Invalid Authenticode status: ' + $s.Status); exit 1 }"
-set "_signatureExit=!ERRORLEVEL!"
-if not "!_signatureExit!"=="0" (
-    echo setup.exe signature validation failed.
-    set "_exitCode=31"
+call :ensure_odt
+set "_odtEnsureExit=!ERRORLEVEL!"
+if not "!_odtEnsureExit!"=="0" (
+    set "_exitCode=!_odtEnsureExit!"
     set "_result=FAILED"
     goto finish
 )
@@ -449,6 +428,95 @@ if /i "%_mode%"=="unattended" (
 )
 del /q "%_verifyOut%" >nul 2>nul
 exit /b %_verifyCommandExit%
+
+::========================================================================
+::  Ensure %_setup% exists and has passed ODT validation.
+::  Recoverable state machine:
+::    cached final valid        -> reuse
+::    cached final invalid      -> remove, then redownload temp
+::    final missing             -> redownload temp
+::  Exit codes: 0 success, 30 download transport failure,
+::               31 ODT validation / cache cleanup / promotion failure.
+:ensure_odt
+set "_odtSource="
+:: Reuse cached final only after validation.
+if exist "%_setup%" (
+    call :validate_odt "%_setup%"
+    set "_cacheValidExit=!ERRORLEVEL!"
+    if /i "%_mode%"=="unattended" call :log "ODT_CACHE_VALID_EXIT_CODE=!_cacheValidExit!"
+    if "!_cacheValidExit!"=="0" (
+        set "_odtSource=CACHED"
+        if /i "%_mode%"=="unattended" call :log "ODT_CACHE_VALID=TRUE"
+        goto :ensure_odt_have
+    )
+    if /i "%_mode%"=="unattended" call :log "ODT_CACHE_VALID=FALSE"
+    del /f /q "%_setup%" >nul 2>nul
+    if exist "%_setup%" (
+        echo Cached setup.exe is invalid and could not be removed.
+        if /i "%_mode%"=="unattended" call :log "ODT_RECOVERY=INVALID_CACHE_REMOVE_FAILED"
+        exit /b 31
+    )
+    if /i "%_mode%"=="unattended" call :log "ODT_RECOVERY=INVALID_CACHE_REMOVED"
+    echo Cached setup.exe was invalid; it has been removed for recovery.
+)
+:: Remove any stale temporary download left by a previous interrupted run.
+if exist "%_setupTmp%" (
+    del /f /q "%_setupTmp%" >nul 2>nul
+    if exist "%_setupTmp%" (
+        echo Stale temporary download could not be removed.
+        if /i "%_mode%"=="unattended" call :log "ODT_RECOVERY=STALE_TEMP_REMOVE_FAILED"
+        exit /b 31
+    )
+    if /i "%_mode%"=="unattended" call :log "ODT_RECOVERY=STALE_TEMP_REMOVED"
+)
+:: Download only to the temporary path; never write the final file directly.
+echo Downloading setup.exe from Microsoft CDN to temporary path...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'https://officecdn.microsoft.com/pr/wsus/setup.exe' -OutFile ([Environment]::GetEnvironmentVariable('_setupTmp')); exit 0 } catch { Write-Error $_; exit 1 }"
+set "_downloadExit=!ERRORLEVEL!"
+if /i "%_mode%"=="unattended" call :log "DOWNLOAD_EXIT_CODE=!_downloadExit!"
+if not "!_downloadExit!"=="0" (
+    echo Failed to download setup.exe
+    del /f /q "%_setupTmp%" >nul 2>nul
+    exit /b 30
+)
+:: Validate the freshly downloaded temp before it can touch the final file.
+call :validate_odt "%_setupTmp%"
+set "_tmpValidExit=!ERRORLEVEL!"
+if not "!_tmpValidExit!"=="0" (
+    echo Downloaded setup.exe failed validation.
+    del /f /q "%_setupTmp%" >nul 2>nul
+    exit /b 31
+)
+:: Promote temp -> final via rename on the same volume (no half-written final).
+move /y "%_setupTmp%" "%_setup%" >nul 2>nul
+set "_promoteExit=!ERRORLEVEL!"
+if /i "%_mode%"=="unattended" call :log "PROMOTE_EXIT_CODE=!_promoteExit!"
+if not "!_promoteExit!"=="0" (
+    echo Failed to promote downloaded setup.exe to final path.
+    del /f /q "%_setupTmp%" >nul 2>nul
+    exit /b 31
+)
+set "_odtSource=DOWNLOADED"
+:ensure_odt_have
+if /i "%_mode%"=="unattended" call :log "ODT_SOURCE=!_odtSource!"
+echo setup.exe is available and validated.
+exit /b 0
+
+::========================================================================
+::  Validate an ODT setup.exe at the path passed in %1.
+::  Checks: file exists, size > 0, Authenticode Status == Valid.
+::  Exit codes: 0 valid, non-zero invalid. Performs no download/promotion.
+:validate_odt
+set "_validatePath=%~1"
+if not exist "%_validatePath%" exit /b 1
+for %%A in ("%_validatePath%") do set "_validateSize=%%~zA"
+if not defined _validateSize set "_validateSize=0"
+if !_validateSize! LEQ 0 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=Get-AuthenticodeSignature -LiteralPath $env:_validatePath; if ($s.Status -eq 'Valid') { exit 0 } else { Write-Error ('Invalid Authenticode status: ' + $s.Status); exit 1 }"
+set "_signatureExit=!ERRORLEVEL!"
+if /i "%_mode%"=="unattended" call :log "SIGNATURE_EXIT_CODE=!_signatureExit!"
+if not "!_signatureExit!"=="0" exit /b 1
+exit /b 0
 
 :log
 set "_logLine=%~1"
