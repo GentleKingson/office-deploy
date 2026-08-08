@@ -1,0 +1,398 @@
+name: Windows Runtime CI
+
+# Runtime validation of the officeDeploy.bat control flow on real
+# GitHub-hosted Windows cmd.exe. This is a safety / contract test:
+#   - no ODT download
+#   - no Office installation
+#   - no activation
+# It deliberately exercises only the unattended control-flow paths of
+# officeDeploy.bat. T9 / T10 are terminated deterministically inside
+# :ensure_odt before any network call by using the script's own
+# stale-temporary-cleanup branch as a fault-injection point.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# No path filtering: this workflow is expected to become a required
+# check, and path/branch filters on a required workflow can leave it
+# stuck Pending. Letting it always run keeps the cost tiny.
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime-contract:
+    name: Runtime contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # ----------------------------------------------------------------------
+      # T1 / T2 / T3 share the same isolated case directory and only differ
+      # by arguments + expected exit code, so a single cmd step runs them.
+      # ----------------------------------------------------------------------
+      - name: T1 Help / T2 Unknown arg / T3 illegal config-only
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\cli" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\cli\officeDeploy.bat" >nul
+
+          :: Per-case TEMP/TMP isolation so logs cannot collide.
+          mkdir "%ROOT%\cli\temp" >nul 2>nul
+          set "TEMP=%ROOT%\cli\temp"
+          set "TMP=%ROOT%\cli\temp"
+
+          :: ---- T1: --help must exit 0 ----
+          call "%ROOT%\cli\officeDeploy.bat" --help > "%ROOT%\cli\t1.out" 2>&1
+          set "RC1=!ERRORLEVEL!"
+          if not "!RC1!"=="0" (
+            echo [T1] FAIL: expected exit 0, got !RC1!
+            type "%ROOT%\cli\t1.out"
+            exit /b 1
+          )
+          findstr /c:"officeDeploy.bat --unattended" "%ROOT%\cli\t1.out" >nul || ( echo [T1] FAIL: usage missing --unattended & exit /b 1 )
+          findstr /c:"officeDeploy.bat --unattended --config-only" "%ROOT%\cli\t1.out" >nul || ( echo [T1] FAIL: usage missing --config-only & exit /b 1 )
+          findstr /c:"officeDeploy.bat --help" "%ROOT%\cli\t1.out" >nul || ( echo [T1] FAIL: usage missing --help & exit /b 1 )
+          if exist "%ROOT%\cli\Configuration.xml" ( echo [T1] FAIL: Configuration.xml leaked & exit /b 1 )
+          if exist "%ROOT%\cli\setup.exe" ( echo [T1] FAIL: setup.exe leaked & exit /b 1 )
+          if exist "%ROOT%\cli\setup.exe.download.tmp" ( echo [T1] FAIL: tmp leaked & exit /b 1 )
+          echo [T1] PASS help-exit=0
+
+          :: ---- T2: --unknown must exit 2 ----
+          call "%ROOT%\cli\officeDeploy.bat" --unknown > "%ROOT%\cli\t2.out" 2>&1
+          set "RC2=!ERRORLEVEL!"
+          if not "!RC2!"=="2" ( echo [T2] FAIL: expected 2, got !RC2! & exit /b 1 )
+          if exist "%ROOT%\cli\Configuration.xml" ( echo [T2] FAIL: Configuration.xml leaked & exit /b 1 )
+          if exist "%ROOT%\cli\setup.exe" ( echo [T2] FAIL: setup.exe leaked & exit /b 1 )
+          if exist "%ROOT%\cli\setup.exe.download.tmp" ( echo [T2] FAIL: tmp leaked & exit /b 1 )
+          echo [T2] PASS unknown-exit=2
+
+          :: ---- T3: --config-only alone must exit 2 ----
+          call "%ROOT%\cli\officeDeploy.bat" --config-only > "%ROOT%\cli\t3.out" 2>&1
+          set "RC3=!ERRORLEVEL!"
+          if not "!RC3!"=="2" ( echo [T3] FAIL: expected 2, got !RC3! & exit /b 1 )
+          if exist "%ROOT%\cli\Configuration.xml" ( echo [T3] FAIL: Configuration.xml leaked & exit /b 1 )
+          if exist "%ROOT%\cli\setup.exe" ( echo [T3] FAIL: setup.exe leaked & exit /b 1 )
+          if exist "%ROOT%\cli\setup.exe.download.tmp" ( echo [T3] FAIL: tmp leaked & exit /b 1 )
+          echo [T3] PASS config-only-alone-exit=2
+
+          exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T4 + T6: real --unattended --config-only must exit 0, produce a
+      # non-empty Configuration.xml, leave no setup.exe / tmp, and write an
+      # unattended log with the required key markers.
+      # ----------------------------------------------------------------------
+      - name: T4 config-only / T6 unattended log
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\config-only" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\config-only\officeDeploy.bat" >nul
+          mkdir "%ROOT%\config-only\temp" >nul 2>nul
+          set "TEMP=%ROOT%\config-only\temp"
+          set "TMP=%ROOT%\config-only\temp"
+
+          call "%ROOT%\config-only\officeDeploy.bat" --unattended --config-only > "%ROOT%\config-only\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+
+          if not "!RC!"=="0" ( echo [T4] FAIL: expected 0, got !RC! & exit /b 1 )
+          if not exist "%ROOT%\config-only\Configuration.xml" ( echo [T4] FAIL: Configuration.xml missing & exit /b 1 )
+          for %%A in ("%ROOT%\config-only\Configuration.xml") do set "SZ=%%~zA"
+          if !SZ! LEQ 0 ( echo [T4] FAIL: Configuration.xml empty & exit /b 1 )
+          if exist "%ROOT%\config-only\setup.exe" ( echo [T4] FAIL: setup.exe should not exist in config-only & exit /b 1 )
+          if exist "%ROOT%\config-only\setup.exe.download.tmp" ( echo [T4] FAIL: tmp should not exist in config-only & exit /b 1 )
+          echo [T4] PASS config-only-exit=0 xml-size=!SZ!
+
+          :: ---- T6: log must exist and carry the contract markers ----
+          if not exist "%TEMP%\office-deploy\office-deploy.log" ( echo [T6] FAIL: log missing & exit /b 1 )
+          set "LOG=%TEMP%\office-deploy\office-deploy.log"
+          findstr /c:"MODE=UNATTENDED" "%LOG%" >nul || ( echo [T6] FAIL: no MODE=UNATTENDED & exit /b 1 )
+          findstr /c:"CONFIG_ONLY=1" "%LOG%" >nul || ( echo [T6] FAIL: no CONFIG_ONLY=1 & exit /b 1 )
+          findstr /c:"ADMIN_CHECK=SKIPPED" "%LOG%" >nul || ( echo [T6] FAIL: no ADMIN_CHECK=SKIPPED & exit /b 1 )
+          findstr /c:"RESULT=SUCCESS" "%LOG%" >nul || ( echo [T6] FAIL: no RESULT=SUCCESS & exit /b 1 )
+          findstr /c:"EXIT_CODE=0" "%LOG%" >nul || ( echo [T6] FAIL: no EXIT_CODE=0 & exit /b 1 )
+          echo [T6] PASS log-markers-ok
+
+          exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T5: validate the Configuration.xml that the BAT actually generated
+      # at runtime (not a static echo reconstruction).
+      # ----------------------------------------------------------------------
+      - name: T5 Validate generated XML
+        shell: pwsh
+        run: |
+          $cfg = Join-Path $env:RUNNER_TEMP 'office-deploy-tests\config-only\Configuration.xml'
+          if (-not (Test-Path -LiteralPath $cfg)) { throw "Configuration.xml not found at $cfg" }
+          [xml]$xml = Get-Content -LiteralPath $cfg -Raw
+
+          function Assert-True($cond, $msg) {
+            if (-not $cond) { throw "ASSERT FAILED: $msg" }
+          }
+
+          $add = $xml.Configuration.Add
+          Assert-True ($add.OfficeClientEdition -eq '64') "OfficeClientEdition=64"
+          Assert-True ($add.Channel -eq 'MonthlyEnterprise') "Channel=MonthlyEnterprise"
+
+          $prod = $add.Product
+          Assert-True ($prod.ID -eq 'O365ProPlusRetail') "Product ID=O365ProPlusRetail"
+
+          Assert-True ($prod.Language.ID -eq 'zh-cn') "Language ID=zh-cn"
+
+          $disp = $xml.Configuration.Display
+          Assert-True ($disp.Level -eq 'None') "Display Level=None"
+          Assert-True ($disp.AcceptEULA -eq 'TRUE') "AcceptEULA=TRUE"
+
+          $upd = $xml.Configuration.Updates
+          Assert-True ($upd.Enabled -eq 'FALSE') "Updates Enabled=FALSE"
+
+          Assert-True ($null -ne $xml.Configuration.RemoveMSI) "RemoveMSI present"
+
+          $excludes = @()
+          foreach ($e in $prod.ExcludeApp) { $excludes += $e.ID }
+          foreach ($expected in 'Groove','Lync','OneDrive','OutlookForWindows','Teams') {
+            Assert-True ($excludes -contains $expected) "ExcludeApp contains $expected"
+          }
+
+          Write-Host "[T5] PASS generated-xml valid; excludes=$($excludes -join ',')"
+
+      # ----------------------------------------------------------------------
+      # T7: working-directory independence. The BAT sits in dir A, we run
+      # it from dir B, and Configuration.xml must land in A (%~dp0).
+      # ----------------------------------------------------------------------
+      - name: T7 Working directory independence
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\working-dir\bat" >nul 2>nul
+          mkdir "%ROOT%\working-dir\cwd" >nul 2>nul
+          mkdir "%ROOT%\working-dir\temp" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\working-dir\bat\officeDeploy.bat" >nul
+
+          set "TEMP=%ROOT%\working-dir\temp"
+          set "TMP=%ROOT%\working-dir\temp"
+
+          pushd "%ROOT%\working-dir\cwd"
+          call "%ROOT%\working-dir\bat\officeDeploy.bat" --unattended --config-only > "%ROOT%\working-dir\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          popd
+
+          if not "!RC!"=="0" ( echo [T7] FAIL: expected 0, got !RC! & exit /b 1 )
+          if not exist "%ROOT%\working-dir\bat\Configuration.xml" ( echo [T7] FAIL: xml not in script dir & exit /b 1 )
+          if exist "%ROOT%\working-dir\cwd\Configuration.xml" ( echo [T7] FAIL: xml leaked into cwd & exit /b 1 )
+          echo [T7] PASS script-relative-config-ok
+          exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T8: path with spaces. Exercises %~f0 / %~dp0 / _cfg / _setup
+      # quoting against a script directory that itself contains spaces.
+      # ----------------------------------------------------------------------
+      - name: T8 Path with spaces
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\Office Deploy Runtime"
+          mkdir "%ROOT%\Case With Spaces" >nul 2>nul
+          mkdir "%ROOT%\temp" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\Case With Spaces\officeDeploy.bat" >nul
+
+          set "TEMP=%ROOT%\temp"
+          set "TMP=%ROOT%\temp"
+
+          pushd "%RUNNER_TEMP%"
+          call "%ROOT%\Case With Spaces\officeDeploy.bat" --unattended --config-only > "%ROOT%\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          popd
+
+          if not "!RC!"=="0" ( echo [T8] FAIL: expected 0, got !RC! & exit /b 1 )
+          if not exist "%ROOT%\Case With Spaces\Configuration.xml" ( echo [T8] FAIL: xml not in spaced script dir & exit /b 1 )
+          echo [T8] PASS path-with-spaces-ok
+          exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T9: invalid cached setup.exe recovery. Fault injection:
+      #   fake setup.exe (plain text)      -> Authenticode invalid
+      #   setup.exe.download.tmp (DIR)     -> del cannot remove a directory
+      # Control flow: validate fails -> cache removed -> stale temp present
+      # -> del fails -> STALE_TEMP_REMOVE_FAILED -> exit 31.
+      # This terminates inside :ensure_odt BEFORE the Invoke-WebRequest line,
+      # so no ODT network download and no Office install can occur.
+      # ----------------------------------------------------------------------
+      - name: T9 Invalid cached setup.exe recovery
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\cache-recovery" >nul 2>nul
+          mkdir "%ROOT%\cache-recovery\temp" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\cache-recovery\officeDeploy.bat" >nul
+
+          :: Fake cached setup.exe: plain text, never a valid Authenticode PE.
+          echo this-is-not-a-valid-odt-setup-exe > "%ROOT%\cache-recovery\setup.exe"
+          :: Stale temp download as a DIRECTORY: "del /f /q" cannot delete it,
+          :: which deterministically drives the stale-temp-remove-failed branch.
+          mkdir "%ROOT%\cache-recovery\setup.exe.download.tmp" >nul
+
+          set "TEMP=%ROOT%\cache-recovery\temp"
+          set "TMP=%ROOT%\cache-recovery\temp"
+
+          call "%ROOT%\cache-recovery\officeDeploy.bat" --unattended > "%ROOT%\cache-recovery\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+
+          :: Stable exit code must be 31 (and not 10/30/50/60).
+          if not "!RC!"=="31" (
+            echo [T9] FAIL: expected exit 31, got !RC!
+            type "%ROOT%\cache-recovery\run.out"
+            exit /b 1
+          )
+
+          :: Invalid cached final must have been removed during recovery.
+          if exist "%ROOT%\cache-recovery\setup.exe" (
+            echo [T9] FAIL: fake setup.exe should have been removed
+            exit /b 1
+          )
+          :: Stale temp directory must still exist (del cannot remove a dir).
+          if not exist "%ROOT%\cache-recovery\setup.exe.download.tmp\" (
+            echo [T9] FAIL: stale temp dir unexpectedly removed
+            exit /b 1
+          )
+
+          :: Guard: the recovery must NOT have reached a real download.
+          findstr /c:"Downloading setup.exe from Microsoft CDN" "%ROOT%\cache-recovery\run.out" >nul && (
+            echo [T9] FAIL: reached ODT network download - fault injection broken
+            exit /b 1
+          )
+          :: Guard: must NOT have reached the Office install stage.
+          findstr /c:"STAGE=INSTALL" "%ROOT%\cache-recovery\run.out" >nul && (
+            echo [T9] FAIL: reached Office install stage
+            exit /b 1
+          )
+
+          :: Required log markers (unattended log lives under isolated TEMP).
+          set "LOG=%TEMP%\office-deploy\office-deploy.log"
+          if not exist "%LOG%" ( echo [T9] FAIL: log missing & exit /b 1 )
+          findstr /c:"ODT_CACHE_VALID=FALSE" "%LOG%" >nul || ( echo [T9] FAIL: no ODT_CACHE_VALID=FALSE & exit /b 1 )
+          findstr /c:"ODT_RECOVERY=INVALID_CACHE_REMOVED" "%LOG%" >nul || ( echo [T9] FAIL: no INVALID_CACHE_REMOVED & exit /b 1 )
+          findstr /c:"ODT_RECOVERY=STALE_TEMP_REMOVE_FAILED" "%LOG%" >nul || ( echo [T9] FAIL: no STALE_TEMP_REMOVE_FAILED & exit /b 1 )
+          findstr /c:"RESULT=FAILED" "%LOG%" >nul || ( echo [T9] FAIL: no RESULT=FAILED & exit /b 1 )
+          findstr /c:"EXIT_CODE=31" "%LOG%" >nul || ( echo [T9] FAIL: no EXIT_CODE=31 & exit /b 1 )
+
+          echo [T9] PASS invalid-cache-recovery-exit=31 no-network no-install
+          exit /b 0
+
+      - name: Upload runtime-contract artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-contract-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/office-deploy-tests/**
+            ${{ runner.temp }}/Office Deploy Runtime/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  wow64-relaunch:
+    name: WOW64 -> Sysnative (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # ----------------------------------------------------------------------
+      # T10: launch officeDeploy.bat from a real 32-bit CMD
+      # (%SystemRoot%\SysWOW64\cmd.exe) on the x64 runner, force the
+      # Sysnative native relaunch, and verify the native child exit code
+      # propagates to the outermost ERRORLEVEL reported to our wrapper.
+      # Same fixture as T9, so the native child also exits 31.
+      # ----------------------------------------------------------------------
+      - name: T10 WOW64 -> Sysnative relaunch
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\wow64" >nul 2>nul
+          mkdir "%ROOT%\wow64\temp" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\wow64\officeDeploy.bat" >nul
+
+          :: Same fault-injection fixture as T9.
+          echo this-is-not-a-valid-odt-setup-exe > "%ROOT%\wow64\setup.exe"
+          mkdir "%ROOT%\wow64\setup.exe.download.tmp" >nul
+
+          set "TEMP=%ROOT%\wow64\temp"
+          set "TMP=%ROOT%\wow64\temp"
+
+          :: Sanity: the runner must expose real SysWOW64 and Sysnative cmd.
+          if not exist "%SystemRoot%\SysWOW64\cmd.exe" ( echo [T10] FAIL: SysWOW64\cmd.exe missing & exit /b 1 )
+          if not exist "%SystemRoot%\Sysnative\cmd.exe" ( echo [T10] FAIL: Sysnative\cmd.exe missing & exit /b 1 )
+
+          :: To avoid fragile nested-quote parsing across two layers of cmd,
+          :: generate a tiny wrapper bat and let the 32-bit CMD run it. The
+          :: wrapper path is space-free, so "cmd /c wrapper" quoting is trivial.
+          > "%ROOT%\wow64\inner.cmd" echo @echo off
+          >> "%ROOT%\wow64\inner.cmd" echo call "%ROOT%\wow64\officeDeploy.bat" --unattended ^> "%ROOT%\wow64\run.out" 2^>^&1
+
+          :: Launch from a genuine 32-bit CMD. The script detects Sysnative
+          :: and relaunches itself natively; the native child exits 31 and
+          :: that must propagate to the outermost level we observe here.
+          "%SystemRoot%\SysWOW64\cmd.exe" /d /c "%ROOT%\wow64\inner.cmd"
+          set "RC=!ERRORLEVEL!"
+
+          if not "!RC!"=="31" (
+            echo [T10] FAIL: expected outermost exit 31, got !RC!
+            type "%ROOT%\wow64\run.out"
+            exit /b 1
+          )
+
+          :: Guard: no real ODT download and no Office install reached.
+          findstr /c:"Downloading setup.exe from Microsoft CDN" "%ROOT%\wow64\run.out" >nul && (
+            echo [T10] FAIL: reached ODT network download
+            exit /b 1
+          )
+          findstr /c:"STAGE=INSTALL" "%ROOT%\wow64\run.out" >nul && (
+            echo [T10] FAIL: reached Office install stage
+            exit /b 1
+          )
+
+          :: The final unattended log is written by the native child, so it
+          :: must carry NATIVE_RELAUNCH=1 alongside EXIT_CODE=31.
+          set "LOG=%TEMP%\office-deploy\office-deploy.log"
+          if not exist "%LOG%" ( echo [T10] FAIL: native child log missing & exit /b 1 )
+          findstr /c:"NATIVE_RELAUNCH=1" "%LOG%" >nul || ( echo [T10] FAIL: no NATIVE_RELAUNCH=1 in log & exit /b 1 )
+          findstr /c:"EXIT_CODE=31" "%LOG%" >nul || ( echo [T10] FAIL: no EXIT_CODE=31 in log & exit /b 1 )
+
+          echo [T10] PASS wow64->sysnative outermost-exit=31 native-relaunch-logged
+          exit /b 0
+
+      - name: Upload wow64-relaunch artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow64-relaunch-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/office-deploy-tests/**
+          if-no-files-found: warn
+          retention-days: 7
