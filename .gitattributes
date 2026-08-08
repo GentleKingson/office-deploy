@@ -1,0 +1,12 @@
+# officeDeploy.bat is a directly distributed Windows batch file. End users
+# fetch its raw bytes (raw blob download) and run it under cmd.exe, so the
+# line endings stored in the repository MUST be CRLF byte-for-byte.
+#
+# Plain `text eol=crlf` is NOT enough: with `text` set, Git normalizes the
+# index/blob copy to LF and only converts back to CRLF on checkout into a
+# working tree. A raw blob download would then be LF, which is exactly the
+# failure mode we are guarding against.
+#
+# `-text` (text unset) disables ALL line-ending conversion for this path, so
+# the stored blob keeps its CRLF bytes regardless of core.autocrlf.
+officeDeploy.bat -text

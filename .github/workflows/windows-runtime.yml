@@ -16,6 +16,15 @@ name: Windows Runtime CI
 # marker-file + ClickToRun service fixtures. No activation ever runs.
 # T13 drives :oh_activate_core directly (no Office on the runner) to prove
 # the fail-fast guard aborts before the mutating cleanup routines.
+# T14 / T15 / T15b guard the line-ending contract of the distributed artifact.
+# T14 extracts the raw Git blob of officeDeploy.bat (exactly what an end user
+# downloads) and asserts, byte-for-byte, that every line ending is CRLF.
+# T15 runs that same blob via `call` and asserts a clean config-only run
+# (exit 0, valid Configuration.xml, no setup.exe/tmp, SUCCESS in log). T15b
+# then scans the blob's own output for any batch-control-flow-break signature
+# (English + Chinese) -- in PowerShell, because zh strings are unreliable in a
+# cmd script. Together they lock the CRLF requirement that .gitattributes
+# `-text` enforces at storage time.
 
 on:
   pull_request:
@@ -643,6 +652,130 @@ jobs:
           echo [T13] PASS core-failfast no-office abort-before-cleanup rc=!RC!
 
           exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T14: Repository Blob EOL Contract. The single most important guard
+      # against the line-ending regression. It extracts the EXACT bytes Git
+      # stores for officeDeploy.bat (what an end user fetches as the raw blob)
+      # and asserts, byte-for-byte, that every line ending is CRLF and none is
+      # bare LF. It also reports the working-tree file EOL, so a future
+      # checkout-normalization surprise becomes visible in the log. The
+      # `-text` rule in .gitattributes is what makes the stored blob keep CRLF;
+      # if anyone weakens it to `text eol=crlf`, the blob reverts to LF and
+      # this step fails. NOTE: green CI on the prior LF blob proved LF does not
+      # ALWAYS break call:label on Server 2022, so this is hardening, not a
+      # proven single root cause -- but it removes the risk factor for good.
+      # ----------------------------------------------------------------------
+      - name: T14 Repository blob CRLF
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'office-deploy-tests\blob'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $blob = Join-Path $dir 'officeDeploy-blob.bat'
+
+          # Extract the raw blob bytes Git stores. Start-Process stdout
+          # redirection writes bytes verbatim, no PowerShell text/codepage
+          # translation that would corrupt the EOL measurement.
+          $proc = Start-Process -FilePath git -ArgumentList 'cat-file','blob','HEAD:officeDeploy.bat' -RedirectStandardOutput $blob -NoNewWindow -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "[T14] FAIL: git cat-file exit $($proc.ExitCode)" }
+
+          function Measure-Eol([byte[]]$b) {
+            $crlf = 0; $lf = 0
+            for ($i = 0; $i -lt $b.Length; $i++) {
+              if ($b[$i] -eq 10) { if ($i -gt 0 -and $b[$i - 1] -eq 13) { $crlf++ } else { $lf++ } }
+            }
+            @{ CRLF = $crlf; LFOnly = $lf }
+          }
+
+          $blobBytes = [IO.File]::ReadAllBytes($blob)
+          $workBytes = [IO.File]::ReadAllBytes((Join-Path $env:GITHUB_WORKSPACE 'officeDeploy.bat'))
+          $bm = Measure-Eol $blobBytes
+          $wm = Measure-Eol $workBytes
+          Write-Host "[T14] blob     CRLF=$($bm.CRLF) LF_only=$($bm.LFOnly)"
+          Write-Host "[T14] worktree CRLF=$($wm.CRLF) LF_only=$($wm.LFOnly)"
+
+          if ($bm.CRLF -eq 0)  { throw "[T14] FAIL: blob contains no CRLF line endings" }
+          if ($bm.LFOnly -ne 0) { throw "[T14] FAIL: blob contains $($bm.LFOnly) LF-only line endings" }
+          Write-Host "[T14] PASS repository-blob-is-crlf"
+
+      # ----------------------------------------------------------------------
+      # T15: Repository Blob Runtime. Run the EXACT blob bytes (what end users
+      # download) the way a user runs it -- via `call`. Asserts the control
+      # flow survives end to end: exit 0, Configuration.xml generated and
+      # non-empty, no setup.exe / tmp, and -- critically -- the output must
+      # NOT contain any batch-control-flow-break signature ('system cannot find
+      # the batch label' and its zh equivalents). This is the test that would
+      # have surfaced the original production failure regardless of its exact
+      # trigger, because it exercises the distributed artifact directly.
+      # ----------------------------------------------------------------------
+      - name: T15 Repository blob runtime
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "SRC=%RUNNER_TEMP%\office-deploy-tests\blob\officeDeploy-blob.bat"
+          if not exist "%SRC%" ( echo [T15] FAIL: blob missing - T14 must run first & exit /b 1 )
+          set "BDIR=%RUNNER_TEMP%\office-deploy-tests\blob-runtime"
+          mkdir "%BDIR%\temp" >nul 2>nul
+          :: Copy the blob into BDIR so Configuration.xml lands under BDIR (its
+          :: %%~dp0) and stays inside the office-deploy-tests artifact glob.
+          copy /y "%SRC%" "%BDIR%\officeDeploy.bat" >nul
+          set "TEMP=%BDIR%\temp"
+          set "TMP=%BDIR%\temp"
+
+          call "%BDIR%\officeDeploy.bat" --unattended --config-only > "%BDIR%\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+
+          if not "!RC!"=="0" ( echo [T15] FAIL: blob run exit !RC! & type "%BDIR%\run.out" & exit /b 1 )
+          if not exist "%BDIR%\Configuration.xml" ( echo [T15] FAIL: Configuration.xml missing & type "%BDIR%\run.out" & exit /b 1 )
+          for %%A in ("%BDIR%\Configuration.xml") do set "SZ=%%~zA"
+          if !SZ! LEQ 0 ( echo [T15] FAIL: Configuration.xml empty & exit /b 1 )
+
+          :: Negative text guard lives in the T15b PowerShell step below, NOT
+          :: here: a non-ASCII (zh) search string inside a cmd script is
+          :: mis-tokenized by the OEM codepage and breaks this script's own
+          :: parser ("in was unexpected at this time", exit 255).
+
+          if exist "%BDIR%\setup.exe" ( echo [T15] FAIL: setup.exe leaked & exit /b 1 )
+          if exist "%BDIR%\setup.exe.download.tmp" ( echo [T15] FAIL: tmp leaked & exit /b 1 )
+
+          :: Config-only unattended log must report SUCCESS / 0.
+          set "LOG=%TEMP%\office-deploy\office-deploy.log"
+          if exist "%LOG%" findstr /c:"RESULT=SUCCESS" "%LOG%" >nul || ( echo [T15] FAIL: no RESULT=SUCCESS in log & exit /b 1 )
+
+          echo [T15] PASS blob-runtime-exit=0 xml-size=!SZ!
+          exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T15b: Negative text guard for the blob run output. Scans run.out for
+      # ANY batch-control-flow-break signature, English AND Chinese. Done in
+      # PowerShell because non-ASCII search strings are unreliable inside a
+      # cmd script (the OEM codepage mis-tokenizes them and breaks parsing).
+      # ----------------------------------------------------------------------
+      - name: T15b Blob output signature guard
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'office-deploy-tests\blob-runtime\run.out'
+          if (-not (Test-Path -LiteralPath $out)) { throw "[T15b] FAIL: run.out missing - T15 must run first" }
+          # run.out is captured by cmd redirection. On en-US runners it is
+          # ASCII (English), so ReadAllText decodes it losslessly and the
+          # English signature is authoritative. The zh signatures are kept so
+          # the guard also fires on a zh-locale host.
+          $txt = [IO.File]::ReadAllText($out)
+          $signatures = @(
+            'system cannot find the batch label',
+            'the system cannot find the file',
+            '系统找不到指定的批处理标签',
+            '找不到批处理文件'
+          )
+          foreach ($s in $signatures) {
+            if ($txt -like "*$s*") {
+              Write-Host "--- run.out ---"
+              Get-Content -LiteralPath $out
+              throw "[T15b] FAIL: forbidden signature in blob output: $s"
+            }
+          }
+          Write-Host "[T15b] PASS no batch-control-flow-break signature in blob output"
 
       - name: Upload runtime-contract artifacts
         if: always()

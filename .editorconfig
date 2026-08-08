@@ -1,0 +1,7 @@
+root = true
+
+# Only officeDeploy.bat is constrained to CRLF. README.md and the GitHub
+# Actions workflow YAML stay LF, so do not set a blanket [*] rule here.
+[officeDeploy.bat]
+end_of_line = crlf
+insert_final_newline = true
