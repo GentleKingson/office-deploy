@@ -273,8 +273,8 @@ echo Checking for an installed Microsoft Office...
 :: Read-only preflight. Reuses the SAME supported-Office detector the
 :: activation engine uses (:oh_check_supported_office -> :oh_getpath plus
 :: the upstream ClickToRun service validity check), so [2] and the Ohook
-:: core can never disagree on what counts as a supported install.
-set "nul6=2^>nul"
+:: core can never disagree on what counts as a supported install. The
+:: helper defines nul/nul6 itself, so no variable setup is needed here.
 call :oh_check_supported_office
 if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
     echo No supported Microsoft Office installation was found.
@@ -640,10 +640,11 @@ exit /b
 ::  judged broken (service missing) -- even if another valid Office (e.g.
 ::  MSI) remains on the machine. Callers reset `error` BEFORE calling this
 ::  helper, matching upstream ordering, so the error survives to the result.
-::  Defines %nul% itself so it works whether reached from :activate_existing
-::  (which only sets %nul6%) or from :oh_activate_core (which sets %nul%).
+::  Self-contained: defines %nul% and %nul6% itself, so callers need no
+::  variable setup (:oh_getpath reads %nul6%; the service checks read %nul%).
 :oh_check_supported_office
 set "nul=>nul 2>&1"
+set "nul6=2^>nul"
 call :oh_getpath
 sc query ClickToRunSvc %nul%
 set _ohSvcErr1=%errorlevel%
