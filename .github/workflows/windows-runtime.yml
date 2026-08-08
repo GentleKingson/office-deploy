@@ -562,16 +562,22 @@ jobs:
           :: shared :oh_check_supported_office clears every o* flag.
           for %%K in (HKLM\SOFTWARE\Microsoft\Office\ClickToRun HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot) do reg delete "%%K" /f >nul 2>nul
 
-          :: Instrument the COPY: prepend a RUN_CORE dispatcher (with delayed
-          :: expansion, so !ERRORLEVEL! resolves) that jumps straight into
-          :: :oh_activate_core and exits, skipping menu/admin/native relaunch.
-          :: Inject before the first real line (@set masver) so the original
-          :: startup is bypassed entirely when RUN_CORE is passed.
-          powershell -NoProfile -Command "$f='%ROOT%\core-failfast\officeDeploy.bat'; $t=Get-Content -LiteralPath $f -Raw; $i=$t.IndexOf('@set masver'); if($i -lt 0){exit 1}; $d='@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif /i \"%~1\"==\"RUN_CORE\" ( call :oh_activate_core ^& exit /b !ERRORLEVEL! )`r`n'; $t=$t.Insert($i,$d); Set-Content -LiteralPath $f -Value $t -NoNewline; exit 0"
+          :: Instrument the COPY: replace the first line (@set masver=3.10)
+          :: with a RUN_CORE dispatcher + that same line. Uses the SAME
+          :: proven PowerShell -replace pattern as T12 (double-quoted
+          :: replacement string so `r`n becomes real CRLF). The dispatcher
+          :: avoids cmd-expanded tokens: it checks _T13_RUN_CORE (set by the
+          :: caller below) instead of %1, and uses goto :eof to propagate
+          :: the called label's errorlevel. Anchored on @set masver=3.10
+          :: (the unique first line) so the replacement is exact.
+          powershell -NoProfile -Command "$f='%ROOT%\core-failfast\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $old=\"@set masver=3.10\"; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif defined _T13_RUN_CORE ( call :oh_activate_core ^& goto :eof )`r`n@set masver=3.10\"; if(-not $t.StartsWith($old)){exit 1}; $t=$new + $t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T13] FAIL: dispatcher injection failed & exit /b 1 )
 
-          call "%ROOT%\core-failfast\officeDeploy.bat" RUN_CORE > "%ROOT%\core-failfast\out.txt" 2>&1
+          :: Drive core with _T13_RUN_CORE set.
+          set "_T13_RUN_CORE=1"
+          call "%ROOT%\core-failfast\officeDeploy.bat" > "%ROOT%\core-failfast\out.txt" 2>&1
           set "RC=!ERRORLEVEL!"
+          set "_T13_RUN_CORE="
 
           :: Core must return non-zero (exit /b 1 from the fail-fast).
           if "!RC!"=="0" ( echo [T13] FAIL: expected non-zero, got 0 & type "%ROOT%\core-failfast\out.txt" & exit /b 1 )
