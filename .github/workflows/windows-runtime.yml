@@ -555,11 +555,13 @@ jobs:
 
           copy /y "officeDeploy.bat" "%ROOT%\activate-detect\probe.bat" >nul
           :: Build dispatcher + probe with PowerShell SINGLE-quoted strings
-          :: (no interpolation, so !o16c2r! etc. stay literal) and explicit
-          :: CRLF via [char]13+[char]10. No inner double-quotes are needed:
-          :: the probe calls :oh_check_supported_office, which now sets nul6
-          :: itself, so the probe body needs no set/nul6 line.
-          powershell -NoProfile -Command "$f='%ROOT%\activate-detect\probe.bat'; $nl=[char]13+[char]10; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $d1='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if defined _T12E_PROBE ( goto :t12e_probe )'+$nl+'@set masver=3.10'; $p1=':t12e_probe'+$nl+'set error='+$nl+'call :oh_check_supported_office'+$nl+'echo PROBE_o16c2r=!o16c2r!'+$nl+'echo PROBE_o16msi=!o16msi!'+$nl+'echo PROBE_error=!error!'+$nl+'exit /b 0'+$nl; if(-not $t.StartsWith($old)){exit 1}; $t=$d1 + $t.Substring($old.Length) + $nl + $p1; [IO.File]::WriteAllText($f,$t); exit 0"
+          :: and explicit CRLF ([char]13+[char]10). The probe echoes variable
+          :: values with !var! syntax; those literal exclamation marks must
+          :: survive the cmd run-block, which has EnableDelayedExpansion ON
+          :: and would expand !o16c2r! to empty. So emit '!' as [char]33 and
+          :: the variable name separately, assembling the string in PS so cmd
+          :: never sees a literal '!'.
+          powershell -NoProfile -Command "$f='%ROOT%\activate-detect\probe.bat'; $nl=[char]13+[char]10; $x=[char]33; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $d1='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if defined _T12E_PROBE ( goto :t12e_probe )'+$nl+'@set masver=3.10'; $p1=':t12e_probe'+$nl+'set error='+$nl+'call :oh_check_supported_office'+$nl+'echo PROBE_o16c2r='+$x+'o16c2r'+$x+$nl+'echo PROBE_o16msi='+$x+'o16msi'+$x+$nl+'echo PROBE_error='+$x+'error'+$x+$nl+'exit /b 0'+$nl; if(-not $t.StartsWith($old)){exit 1}; $t=$d1 + $t.Substring($old.Length) + $nl + $p1; [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T12e] FAIL: probe injection failed & exit /b 1 )
 
           set "_T12E_PROBE=1"
