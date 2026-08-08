@@ -94,11 +94,15 @@ jobs:
           exit /b 0
 
       # ----------------------------------------------------------------------
-      # T4 + T6: real --unattended --config-only must exit 0, produce a
+      # T4 / T4b / T6: real --unattended --config-only must exit 0, produce a
       # non-empty Configuration.xml, leave no setup.exe / tmp, and write an
-      # unattended log with the required key markers.
+      # unattended log with the required key markers. T4b re-runs the same
+      # case with arguments in reverse order to exercise two consecutive
+      # shift /1 in :parse_args and confirm the loop-style parser is order
+      # independent. T6 also pins the %0 root-cause fix (SCRIPT_PATH reads
+      # %~f0 directly and must not be corrupted).
       # ----------------------------------------------------------------------
-      - name: T4 config-only / T6 unattended log
+      - name: T4 T4b config-only / T6 unattended log
         shell: cmd
         run: |
           setlocal EnableDelayedExpansion
@@ -120,7 +124,37 @@ jobs:
           if exist "%ROOT%\config-only\setup.exe.download.tmp" ( echo [T4] FAIL: tmp should not exist in config-only & exit /b 1 )
           echo [T4] PASS config-only-exit=0 xml-size=!SZ!
 
+          :: ---- T4b: reverse argument order (--config-only --unattended) ----
+          :: The loop-style parser should accept arguments in any order. This
+          :: exercises two consecutive shift /1 and proves %0 is preserved
+          :: across both. Uses a fresh temp so the log is unambiguous.
+          mkdir "%ROOT%\config-only-rev" >nul 2>nul
+          mkdir "%ROOT%\config-only-rev\temp" >nul 2>nul
+          set "TEMP=%ROOT%\config-only-rev\temp"
+          set "TMP=%ROOT%\config-only-rev\temp"
+          :: Re-copy the bat so Configuration.xml lands in the rev case dir.
+          copy /y "officeDeploy.bat" "%ROOT%\config-only-rev\officeDeploy.bat" >nul
+          call "%ROOT%\config-only-rev\officeDeploy.bat" --config-only --unattended > "%ROOT%\config-only-rev\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T4b] FAIL: expected 0, got !RC! & exit /b 1 )
+          if not exist "%ROOT%\config-only-rev\Configuration.xml" ( echo [T4b] FAIL: Configuration.xml missing & exit /b 1 )
+          for %%A in ("%ROOT%\config-only-rev\Configuration.xml") do set "SZ=%%~zA"
+          if !SZ! LEQ 0 ( echo [T4b] FAIL: Configuration.xml empty & exit /b 1 )
+          :: Display Level must be None (unattended mode was detected). Avoid
+          :: embedding literal quotes in findstr /c (CMD ends the string at "),
+          :: so search for the unambiguous quote-free substrings instead.
+          findstr /c:"Level=" "%ROOT%\config-only-rev\Configuration.xml" >nul || ( echo [T4b] FAIL: no Display Level & exit /b 1 )
+          findstr /c:"None" "%ROOT%\config-only-rev\Configuration.xml" >nul || ( echo [T4b] FAIL: Display Level not None & exit /b 1 )
+          if exist "%ROOT%\config-only-rev\setup.exe" ( echo [T4b] FAIL: setup.exe should not exist & exit /b 1 )
+          echo [T4b] PASS config-only-reverse-order-exit=0
+          :: Restore the forward-order temp for T6's log assertions below.
+          set "TEMP=%ROOT%\config-only\temp"
+          set "TMP=%ROOT%\config-only\temp"
+
           :: ---- T6: log must exist and carry the contract markers ----
+          :: SCRIPT_PATH now reads %~f0 directly (root-cause fix), so this
+          :: step is a true bare-shift root-cause regression: if shift is
+          :: ever changed back to bare shift, %~f0 corrupts and T6 fails.
           if not exist "%TEMP%\office-deploy\office-deploy.log" ( echo [T6] FAIL: log missing & exit /b 1 )
           set "LOG=%TEMP%\office-deploy\office-deploy.log"
           findstr /c:"MODE=UNATTENDED" "%LOG%" >nul || ( echo [T6] FAIL: no MODE=UNATTENDED & exit /b 1 )
@@ -129,14 +163,10 @@ jobs:
           findstr /c:"RESULT=SUCCESS" "%LOG%" >nul || ( echo [T6] FAIL: no RESULT=SUCCESS & exit /b 1 )
           findstr /c:"EXIT_CODE=0" "%LOG%" >nul || ( echo [T6] FAIL: no EXIT_CODE=0 & exit /b 1 )
 
-          :: Regression (Runtime-discovered bug): bare `shift` in :parse_args
-          :: used to corrupt %0/%~f0, so SCRIPT_PATH logged as the CWD plus
-          :: the last shifted argument (e.g. "...\--unattended") instead of
-          :: the script path. Re-read the SCRIPT_PATH line from the log and
-          :: verify (a) it names officeDeploy.bat and (b) it does not contain
-          :: a backslash followed by "--" (the leaked-arg signature). Uses a
-          :: for /f read plus CMD string substitution to avoid findstr
-          :: path-literal quirks.
+          :: Root-cause regression: SCRIPT_PATH (now %~f0) must name the BAT
+          :: and must not contain a backslash followed by "--" (the leaked-arg
+          :: signature of bare-shift corruption). Uses for /f + CMD string
+          :: substitution to avoid findstr path-literal quirks.
           set "SP_LINE="
           for /f "usebackq tokens=1,* delims==" %%A in ("%LOG%") do (
             if "%%A"=="[office-deploy] SCRIPT_PATH" set "SP_LINE=%%B"
@@ -408,7 +438,26 @@ jobs:
           findstr /c:"NATIVE_RELAUNCH=1" "%LOG%" >nul || ( echo [T10] FAIL: no NATIVE_RELAUNCH=1 in log & exit /b 1 )
           findstr /c:"EXIT_CODE=31" "%LOG%" >nul || ( echo [T10] FAIL: no EXIT_CODE=31 in log & exit /b 1 )
 
-          echo [T10] PASS wow64->sysnative outermost-exit=31 native-relaunch-logged
+          :: Native child parsed --unattended AND re1 (two shift /1). Assert
+          :: its SCRIPT_PATH still names officeDeploy.bat and is not polluted
+          :: by a leaked argument (\re1 or \--unattended are the bare-shift
+          :: corruption signatures). This proves %0 survives multiple shifts
+          :: in the relaunched child too.
+          set "SP_LINE="
+          for /f "usebackq tokens=1,* delims==" %%A in ("%LOG%") do (
+            if "%%A"=="[office-deploy] SCRIPT_PATH" set "SP_LINE=%%B"
+          )
+          if not defined SP_LINE ( echo [T10] FAIL: native child SCRIPT_PATH line absent & exit /b 1 )
+          set "SP_TEST=!SP_LINE:officeDeploy.bat=!"
+          if "!SP_TEST!"=="!SP_LINE!" ( echo [T10] FAIL: native SCRIPT_PATH not the bat: !SP_LINE! & exit /b 1 )
+          set "SP_TEST=!SP_LINE:\re1=!"
+          if not "!SP_TEST!"=="!SP_LINE!" ( echo [T10] FAIL: leaked re1 in SCRIPT_PATH: !SP_LINE! & exit /b 1 )
+          set "SP_TEST=!SP_LINE:\--unattended=!"
+          if not "!SP_TEST!"=="!SP_LINE!" ( echo [T10] FAIL: leaked --unattended in SCRIPT_PATH: !SP_LINE! & exit /b 1 )
+
+          :: NOTE: avoid an unescaped "->" in the PASS line; CMD treats ">" as
+          :: redirection, which would swallow the rest of the echo.
+          echo [T10] PASS WOW64-to-Sysnative outermost-exit=31 native-relaunch-logged SCRIPT_PATH-ok
           exit /b 0
 
       - name: Upload wow64-relaunch artifacts

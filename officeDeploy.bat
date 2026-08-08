@@ -20,22 +20,22 @@ set "_log=%_logDir%\office-deploy.log"
 :: Stable CLI exit codes: 2 arguments, 10 admin, 20 environment, 30/31 ODT,
 :: 40 configuration, 50 install, 60 verification, 70 internal.
 
-:: Capture the batch file's own path before :parse_args. The argument
-:: parser below uses bare `shift`, which in CMD also shifts %0, so by the
-:: time we consume %~f0 again (logging, Sysnative/SysArm32 relaunch) %0
-:: would hold the last shifted argument instead of the script path.
+:: Defensive stable script path for the Sysnative/SysArm32 relaunch lines.
+:: :parse_args below uses `shift /1`, which leaves %0 (the batch path)
+:: untouched, so %~f0 / %~dp0 remain valid everywhere after parsing. _self
+:: is kept as an explicit, parser-independent path for the relaunch lines.
 set "_self=%~f0"
 
 :parse_args
 if "%~1"=="" goto args_parsed
-if /i "%~1"=="--unattended" (set "_mode=unattended"&shift&goto parse_args)
-if /i "%~1"=="/unattended" (set "_mode=unattended"&shift&goto parse_args)
-if /i "%~1"=="--config-only" (set "_configOnly=1"&shift&goto parse_args)
-if /i "%~1"=="/config-only" (set "_configOnly=1"&shift&goto parse_args)
+if /i "%~1"=="--unattended" (set "_mode=unattended"&shift /1&goto parse_args)
+if /i "%~1"=="/unattended" (set "_mode=unattended"&shift /1&goto parse_args)
+if /i "%~1"=="--config-only" (set "_configOnly=1"&shift /1&goto parse_args)
+if /i "%~1"=="/config-only" (set "_configOnly=1"&shift /1&goto parse_args)
 if /i "%~1"=="--help" (call :show_help&endlocal&exit /b 0)
 if /i "%~1"=="/help" (call :show_help&endlocal&exit /b 0)
-if /i "%~1"=="re1" (set "_re1=1"&set "_nativeRelaunch=1"&shift&goto parse_args)
-if /i "%~1"=="re2" (set "_re2=1"&set "_nativeRelaunch=1"&shift&goto parse_args)
+if /i "%~1"=="re1" (set "_re1=1"&set "_nativeRelaunch=1"&shift /1&goto parse_args)
+if /i "%~1"=="re2" (set "_re2=1"&set "_nativeRelaunch=1"&shift /1&goto parse_args)
 echo [office-deploy] ERROR=Unknown argument.
 call :show_help
 endlocal&exit /b 2
@@ -67,7 +67,7 @@ if /i "%_mode%"=="unattended" (
     call :log "LOG_INIT_EXIT_CODE=!_logInitExit!"
     call :log "MODE=UNATTENDED"
     call :log "CONFIG_ONLY=%_configOnly%"
-    call :log "SCRIPT_PATH=%_self%"
+    call :log "SCRIPT_PATH=%~f0"
     for /f "delims=" %%V in ('ver') do call :log "WINDOWS_VERSION=%%V"
     call :log "PROCESSOR_ARCHITECTURE=%PROCESSOR_ARCHITECTURE%"
     call :log "NATIVE_RELAUNCH=%_nativeRelaunch%"
