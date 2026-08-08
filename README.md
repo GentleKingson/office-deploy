@@ -47,7 +47,7 @@ The interactive mode displays an action menu:
 ```
 
 - `[1] Install` performs the normal interactive Microsoft 365 installation flow.
-- `[2] Activate installed Office` only acts on Office that is already installed. It detects Office through the same MAS-derived `:oh_getpath` that the activation engine itself uses (registry key **and** Office marker file, both 32/64-bit aware), then activates it by reusing the script's existing Ohook activation capability — the same implementation the `[1]` post-install path uses. It does not download or reinstall Office. Ohook is idempotent, so re-running `[2]` is safe; it reinstalls cleanly.
+- `[2] Activate installed Office` only acts on Office that is already installed. It detects Office through the same MAS-derived detector the activation engine itself uses (`:oh_check_supported_office` → `:oh_getpath`, which requires the registry key **and** the Office marker file, both 32/64-bit aware, **plus** the upstream ClickToRun service validity check), then activates it by reusing the script's existing Ohook activation capability — the same implementation the `[1]` post-install path uses. It does not download or reinstall Office. Ohook is idempotent, so re-running `[2]` is safe; it reinstalls cleanly.
 
 > Both activation paths (`[1]` post-install and `[2]` Activate installed Office) share the repository's existing MAS-derived Ohook activation implementation. GitHub Actions does not execute Office activation.
 >
@@ -365,7 +365,8 @@ Coverage includes:
 - native child → parent exit-code propagation;
 - native child `SCRIPT_PATH` preservation;
 - interactive menu rendering and Exit mapping (`T11`);
-- option `[2]` Office detection through the same MAS-derived `:oh_getpath` the activation engine uses, against mocked registry **and** Office marker files (64-bit Click-to-Run and 32-bit `Wow6432Node` MSI pass; a registry-without-marker case is rejected) (`T12`, stopped at a test seam before Ohook — no activation is executed).
+- option `[2]` Office detection through the same MAS-derived detector the activation engine uses (`:oh_check_supported_office`), against mocked registry **and** Office marker files **and** the ClickToRun service: 64-bit Click-to-Run and 32-bit `Wow6432Node` MSI pass; registry-without-marker is rejected; registry+marker without the ClickToRun service is rejected (`T12`, instruments a test bat copy — no Ohook activation is executed);
+- the `:oh_activate_core` fail-fast guard, which must abort before the mutating cleanup routines when no supported Office is present (`T13`).
 
 See:
 
@@ -386,7 +387,7 @@ The runtime workflow intentionally does **not**:
 - execute Ohook;
 - test ARM64 / `SysArm32`.
 
-`T12` exercises option `[2]` only up to the `OFFICE_DEPLOY_TEST_DETECT_ONLY` test seam (an environment variable that makes the option stop after the read-only `:oh_getpath` preflight and before invoking Ohook). Activation itself stays outside the CI boundary.
+`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. Activation itself stays outside the CI boundary.
 
 These belong to separate validation stages.
 

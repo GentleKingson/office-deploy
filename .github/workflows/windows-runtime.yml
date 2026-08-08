@@ -9,10 +9,13 @@ name: Windows Runtime CI
 # officeDeploy.bat. T9 / T10 are terminated deterministically inside
 # :ensure_odt before any network call by using the script's own
 # stale-temporary-cleanup branch as a fault-injection point.
-# T12 is the only test that enters the interactive option [2] path; it
-# stops at the OFFICE_DEPLOY_TEST_DETECT_ONLY seam before :oh_activate_core,
-# so the read-only detection / license classification runs against mocked
-# registry fixtures but no Ohook activation is ever executed.
+# T12 is the only test that enters the interactive option [2] path. It
+# instruments a COPIED bat at runtime (there is NO test seam in the
+# production script) so the Ohook call becomes unreachable, then drives the
+# read-only :oh_check_supported_office detector against mocked registry +
+# marker-file + ClickToRun service fixtures. No activation ever runs.
+# T13 drives :oh_activate_core directly (no Office on the runner) to prove
+# the fail-fast guard aborts before the mutating cleanup routines.
 
 on:
   pull_request:
@@ -407,17 +410,23 @@ jobs:
       # ----------------------------------------------------------------------
       # T12: option [2] "Activate installed Office" detection control flow.
       # The only test that executes option [2]. It drives the real MAS-derived
-      # :oh_getpath detector (registry key AND Office marker file, 32/64-bit
-      # aware) against mocked fixtures, then stops at the
-      # OFFICE_DEPLOY_TEST_DETECT_ONLY test seam BEFORE :oh_activate_core, so
-      # no Ohook activation or licensing mutation ever runs in CI.
-      #   A: 64-bit Click-to-Run  (registry + Licenses16/ProPlus*.xrm-ms)  PASS
-      #   B: 32-bit MSI           (Wow6432Node + *Picker.dll)              PASS
-      #   C: registry present but NO marker file  -> must be REJECTED (70)
+      # :oh_check_supported_office detector (:oh_getpath registry+marker file,
+      # PLUS the upstream ClickToRun service validity check) against mocked
+      # fixtures, then stops BEFORE :oh_activate_core, so no Ohook activation
+      # or licensing mutation ever runs in CI.
+      #
+      # IMPORTANT: there is NO test seam in production officeDeploy.bat. CI
+      # instruments the COPIED test bat at runtime, inserting a `goto finish`
+      # right after the "detected" echo inside :activate_existing so the Ohook
+      # call becomes unreachable. Production code is never test-gated.
+      #   A: 64-bit Click-to-Run (registry + marker + service present)  PASS
+      #   B: 32-bit MSI           (Wow6432Node + *Picker.dll)            PASS
+      #   C: registry present but NO marker file         -> REJECTED (70)
+      #   D: registry + marker but NO ClickToRun service -> REJECTED (70)
       # Also guards the Wow6432Node spelling so the 32-bit regression cannot
       # silently return.
       # ----------------------------------------------------------------------
-      - name: T12 option [2] detection (read-only, mocked registry + marker files)
+      - name: T12 option [2] detection (read-only, mocked registry + marker + service)
         shell: cmd
         run: |
           setlocal EnableDelayedExpansion
@@ -427,36 +436,56 @@ jobs:
           copy /y "officeDeploy.bat" "%ROOT%\activate-detect\officeDeploy.bat" >nul
           set "TEMP=%ROOT%\activate-detect\temp"
           set "TMP=%ROOT%\activate-detect\temp"
-          set "OFFICE_DEPLOY_TEST_DETECT_ONLY=1"
+
+          :: Instrument the COPY (never the checked-in bat): insert a
+          :: `goto finish` immediately after the unique "detected" echo in
+          :activate_existing so :oh_activate_core becomes unreachable in CI.
+          :: Anchor is unique to :activate_existing (the [1] post-install path
+          :: has no such line). Uses a backtick-n newline in PowerShell.
+          powershell -NoProfile -Command "$f='%ROOT%\activate-detect\officeDeploy.bat'; $a='echo Microsoft Office detected. Proceeding with Ohook activation.'; $t=Get-Content -LiteralPath $f -Raw; if($t -notlike ('*'+$a+'*')){exit 1}; $t=$t -replace [regex]::Escape($a), ($a+\"`r`ngoto finish\"); Set-Content -LiteralPath $f -Value $t -NoNewline; exit 0"
+          if !ERRORLEVEL! NEQ 0 ( echo [T12] FAIL: instrumentation anchor not found & exit /b 1 )
+
+          :: Static guard: production bat must NOT carry any test seam.
+          findstr /c:"OFFICE_DEPLOY_TEST_DETECT_ONLY" "officeDeploy.bat" >nul && ( echo [T12] FAIL: test seam present in production bat & exit /b 1 )
 
           :: Helper: wipe every Office detection key + fixture dir between
           :: scenarios so a leftover cannot satisfy a later scenario.
           :: :oh_getpath reads these keys (C2R InstallPath / MSI InstallRoot
-          :: Path) and then requires a marker FILE under the install path.
+          :: Path) and then requires a marker FILE under the install path;
+          :: :oh_check_supported_office additionally requires ClickToRunSvc.
           set "CLEAN_KEYS=HKLM\SOFTWARE\Microsoft\Office\ClickToRun HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\15.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\15.0\Common\InstallRoot HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\14.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\14.0\Common\InstallRoot"
           rmdir /s /q "C:\Fix16" >nul 2>nul
           rmdir /s /q "C:\Fix16x86" >nul 2>nul
           rmdir /s /q "C:\NoMarker" >nul 2>nul
+          rmdir /s /q "C:\NoSvc" >nul 2>nul
+          :: Remove any leftover test services from prior runs, best-effort.
+          sc delete ClickToRunSvc >nul 2>nul
+          sc delete OfficeSvc >nul 2>nul
 
-          :: ---- Scenario A: 64-bit Click-to-Run + marker file ----
+          :: ---- Scenario A: 64-bit C2R + marker + service present ----
           for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
           :: :oh_getpath reads ClickToRun\InstallPath, then checks
           :: <InstallPath>\root\Licenses16\ProPlus*.xrm-ms.
           reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f /v InstallPath /t REG_SZ /d "C:\Fix16" >nul || ( echo [T12a] FAIL: reg add InstallPath & exit /b 1 )
           mkdir "C:\Fix16\root\Licenses16" >nul 2>nul
           echo dummy-license > "C:\Fix16\root\Licenses16\ProPlusDummy.xrm-ms"
+          :: Create a dummy ClickToRunSvc so sc query returns 0 (present).
+          :: `binPath` must be quoted; sc create rejects a missing binary but
+          :: still registers the service name, which is all sc query checks.
+          sc create ClickToRunSvc binPath= "%SystemRoot%\system32\cmd.exe" >nul || ( echo [T12a] FAIL: sc create ClickToRunSvc & exit /b 1 )
 
           echo 2| call "%ROOT%\activate-detect\officeDeploy.bat" > "%ROOT%\activate-detect\a.out" 2>&1
           set "RC=!ERRORLEVEL!"
+          sc delete ClickToRunSvc >nul 2>nul
           if not "!RC!"=="0" ( echo [T12a] FAIL: expected exit 0, got !RC! & type "%ROOT%\activate-detect\a.out" & exit /b 1 )
           findstr /c:"Microsoft Office detected" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: not detected & type "%ROOT%\activate-detect\a.out" & exit /b 1 )
-          findstr /c:"TEST_DETECT_ONLY=1" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: test seam not reached & exit /b 1 )
           findstr /c:"Activating your Office" "%ROOT%\activate-detect\a.out" >nul && ( echo [T12a] FAIL: reached Ohook activation & exit /b 1 )
           findstr /c:"No supported Microsoft Office" "%ROOT%\activate-detect\a.out" >nul && ( echo [T12a] FAIL: falsely rejected & exit /b 1 )
-          echo [T12a] PASS clicktorun-x64 registry+marker detected no-ohook
+          echo [T12a] PASS clicktorun-x64 registry+marker+service detected no-ohook
 
           :: ---- Scenario B: 32-bit MSI (Wow6432Node) + marker file ----
           for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
+          :: MSI installs are not gated on ClickToRunSvc, so no service here.
           :: :oh_getpath reads 16.0\Common\InstallRoot\Path, then checks
           :: <Path>\*Picker.dll.
           reg add "HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot" /f /v Path /t REG_SZ /d "C:\Fix16x86" >nul || ( echo [T12b] FAIL: reg add MSI root & exit /b 1 )
@@ -467,7 +496,6 @@ jobs:
           set "RC=!ERRORLEVEL!"
           if not "!RC!"=="0" ( echo [T12b] FAIL: expected exit 0, got !RC! & type "%ROOT%\activate-detect\b.out" & exit /b 1 )
           findstr /c:"Microsoft Office detected" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: not detected & type "%ROOT%\activate-detect\b.out" & exit /b 1 )
-          findstr /c:"TEST_DETECT_ONLY=1" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: test seam not reached & exit /b 1 )
           findstr /c:"Activating your Office" "%ROOT%\activate-detect\b.out" >nul && ( echo [T12b] FAIL: reached Ohook activation & exit /b 1 )
           findstr /c:"No supported Microsoft Office" "%ROOT%\activate-detect\b.out" >nul && ( echo [T12b] FAIL: falsely rejected & exit /b 1 )
           echo [T12b] PASS msi-x86-wow6432node registry+marker detected no-ohook
@@ -481,14 +509,81 @@ jobs:
           set "RC=!ERRORLEVEL!"
           if not "!RC!"=="70" ( echo [T12c] FAIL: expected exit 70, got !RC! & type "%ROOT%\activate-detect\c.out" & exit /b 1 )
           findstr /c:"No supported Microsoft Office installation was found." "%ROOT%\activate-detect\c.out" >nul || ( echo [T12c] FAIL: reject message missing & type "%ROOT%\activate-detect\c.out" & exit /b 1 )
-          findstr /c:"TEST_DETECT_ONLY=1" "%ROOT%\activate-detect\c.out" >nul && ( echo [T12c] FAIL: seam reached on reject & exit /b 1 )
+          findstr /c:"Microsoft Office detected" "%ROOT%\activate-detect\c.out" >nul && ( echo [T12c] FAIL: falsely detected & exit /b 1 )
           findstr /c:"Activating your Office" "%ROOT%\activate-detect\c.out" >nul && ( echo [T12c] FAIL: reached Ohook activation & exit /b 1 )
           echo [T12c] PASS registry-without-marker rejected exit=70 no-ohook
+
+          :: ---- Scenario D: registry + marker but NO ClickToRun service -> REJECT ----
+          for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
+          sc delete ClickToRunSvc >nul 2>nul
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f /v InstallPath /t REG_SZ /d "C:\NoSvc" >nul || ( echo [T12d] FAIL: reg add InstallPath & exit /b 1 )
+          mkdir "C:\NoSvc\root\Licenses16" >nul 2>nul
+          echo dummy-license > "C:\NoSvc\root\Licenses16\ProPlusDummy.xrm-ms"
+          :: Deliberately do NOT create ClickToRunSvc; sc query -> 1060.
+
+          echo 2| call "%ROOT%\activate-detect\officeDeploy.bat" > "%ROOT%\activate-detect\d.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="70" ( echo [T12d] FAIL: expected exit 70, got !RC! & type "%ROOT%\activate-detect\d.out" & exit /b 1 )
+          findstr /c:"No supported Microsoft Office installation was found." "%ROOT%\activate-detect\d.out" >nul || ( echo [T12d] FAIL: reject message missing & type "%ROOT%\activate-detect\d.out" & exit /b 1 )
+          findstr /c:"Not found, Office 16.0 files found" "%ROOT%\activate-detect\d.out" >nul || ( echo [T12d] FAIL: service-check message missing & type "%ROOT%\activate-detect\d.out" & exit /b 1 )
+          findstr /c:"Microsoft Office detected" "%ROOT%\activate-detect\d.out" >nul && ( echo [T12d] FAIL: falsely detected despite missing service & exit /b 1 )
+          findstr /c:"Activating your Office" "%ROOT%\activate-detect\d.out" >nul && ( echo [T12d] FAIL: reached Ohook activation & exit /b 1 )
+          echo [T12d] PASS registry+marker-without-service rejected exit=70 no-ohook
 
           :: ---- Static guards: Wow6432Node spelling must not regress ----
           findstr /c:"WOW64Node\Microsoft" "%ROOT%\activate-detect\officeDeploy.bat" >nul && ( echo [T12] FAIL: WOW64Node typo present & exit /b 1 )
           findstr /c:"Wow6432Node\Microsoft" "%ROOT%\activate-detect\officeDeploy.bat" >nul || ( echo [T12] FAIL: Wow6432Node key missing & exit /b 1 )
           echo [T12] PASS wow6432node-spelling-guard
+
+          exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T13: :oh_activate_core fail-fast regression. The most important new
+      # defense-in-depth guard: when NO supported Office is present, core must
+      # abort BEFORE the per-product routines and BEFORE the unconditional
+      # :oh_clearblock / :oh_uninstkey / :oh_licrefresh cleanup (which mutate
+      # license state). T12 stops before core, so this drives core directly.
+      # It instruments the test COPY with a RUN_CORE dispatcher (never the
+      # production bat) and, with no Office on the runner, asserts core exits
+      # non-zero without ever reaching the cleanup markers.
+      # ----------------------------------------------------------------------
+      - name: T13 oh_activate_core fail-fast (no Office)
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\core-failfast" >nul 2>nul
+          mkdir "%ROOT%\core-failfast\temp" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\core-failfast\officeDeploy.bat" >nul
+          set "TEMP=%ROOT%\core-failfast\temp"
+          set "TMP=%ROOT%\core-failfast\temp"
+
+          :: Ensure the runner has no supported Office keys/services so the
+          :: shared :oh_check_supported_office clears every o* flag.
+          for %%K in (HKLM\SOFTWARE\Microsoft\Office\ClickToRun HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot) do reg delete "%%K" /f >nul 2>nul
+
+          :: Instrument the COPY: prepend a RUN_CORE dispatcher (with delayed
+          :: expansion, so !ERRORLEVEL! resolves) that jumps straight into
+          :: :oh_activate_core and exits, skipping menu/admin/native relaunch.
+          :: Inject before the first real line (@set masver) so the original
+          :: startup is bypassed entirely when RUN_CORE is passed.
+          powershell -NoProfile -Command "$f='%ROOT%\core-failfast\officeDeploy.bat'; $t=Get-Content -LiteralPath $f -Raw; $i=$t.IndexOf('@set masver'); if($i -lt 0){exit 1}; $d='@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif /i \"%~1\"==\"RUN_CORE\" ( call :oh_activate_core ^& exit /b !ERRORLEVEL! )`r`n'; $t=$t.Insert($i,$d); Set-Content -LiteralPath $f -Value $t -NoNewline; exit 0"
+          if !ERRORLEVEL! NEQ 0 ( echo [T13] FAIL: dispatcher injection failed & exit /b 1 )
+
+          call "%ROOT%\core-failfast\officeDeploy.bat" RUN_CORE > "%ROOT%\core-failfast\out.txt" 2>&1
+          set "RC=!ERRORLEVEL!"
+
+          :: Core must return non-zero (exit /b 1 from the fail-fast).
+          if "!RC!"=="0" ( echo [T13] FAIL: expected non-zero, got 0 & type "%ROOT%\core-failfast\out.txt" & exit /b 1 )
+          :: Must print the no-Office abort line.
+          findstr /c:"No supported Microsoft Office was found to activate." "%ROOT%\core-failfast\out.txt" >nul || ( echo [T13] FAIL: abort line missing & type "%ROOT%\core-failfast\out.txt" & exit /b 1 )
+          :: Must NOT reach the mutating cleanup routines. These are their
+          :: distinctive success echoes (only printed if the routine runs).
+          findstr /c:"Clearing Office License Blocks" "%ROOT%\core-failfast\out.txt" >nul && ( echo [T13] FAIL: reached oh_clearblock & type "%ROOT%\core-failfast\out.txt" & exit /b 1 )
+          findstr /c:"Uninstalling Other/Grace Keys" "%ROOT%\core-failfast\out.txt" >nul && ( echo [T13] FAIL: reached oh_uninstkey & type "%ROOT%\core-failfast\out.txt" & exit /b 1 )
+          :: Must NOT proceed into per-product activation echoes.
+          findstr /c:"Activating Office..." "%ROOT%\core-failfast\out.txt" >nul && ( echo [T13] FAIL: reached per-product activation & type "%ROOT%\core-failfast\out.txt" & exit /b 1 )
+          echo [T13] PASS core-failfast no-office abort-before-cleanup rc=!RC!
 
           exit /b 0
 

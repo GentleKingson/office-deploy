@@ -258,24 +258,24 @@ goto finish
 ::  Activate installed Office entry point.
 ::  Interactive control layer for option [2] of the menu.
 ::  Detects Office that is ALREADY installed on this machine by reusing the
-::  script's own MAS-derived :oh_getpath detector (the exact contract Ohook
-::  itself relies on: registry key AND marker file, 32/64-bit aware), then
-::  activates it through the existing :oh_activate_core Ohook implementation
-::  (the same one used by the post-install :activate path). It never downloads
-::  or reinstalls Office, never touches the ODT / Configuration.xml path, and
-::  has no second, weaker detector or a WMI license classifier of its own.
-::  Ohook is idempotent, so re-running [2] is safe; it reinstalls cleanly.
+::  SAME supported-Office detector the activation engine uses
+::  (:oh_check_supported_office -> :oh_getpath registry+marker file, plus the
+::  upstream ClickToRun service validity check), then activates it through
+::  the existing :oh_activate_core Ohook implementation (the same one used by
+::  the post-install :activate path). It never downloads or reinstalls Office,
+::  never touches the ODT / Configuration.xml path, and has no second, weaker
+::  detector or a WMI license classifier of its own. Ohook is idempotent, so
+::  re-running [2] is safe; it reinstalls cleanly.
 :activate_existing
 set "_stage=ACTIVATE_EXISTING"
 echo ----------------------------------------------------
 echo Checking for an installed Microsoft Office...
-:: Read-only preflight. :oh_getpath only needs %nul6% defined; it sets its
-:: own _86/_68, reads only the registry + Office marker files, and writes
-:: nothing. It sets o16c2r/o15c2r/o16msi/o15msi/o14msi when a supported
-:: Office is really present. (:oh_activate_core redefines nul6 itself, so
-:: setting it here only satisfies the preflight and is harmless afterwards.)
+:: Read-only preflight. Reuses the SAME supported-Office detector the
+:: activation engine uses (:oh_check_supported_office -> :oh_getpath plus
+:: the upstream ClickToRun service validity check), so [2] and the Ohook
+:: core can never disagree on what counts as a supported install.
 set "nul6=2^>nul"
-call :oh_getpath
+call :oh_check_supported_office
 if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
     echo No supported Microsoft Office installation was found.
     set "_exitCode=70"
@@ -283,13 +283,6 @@ if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined
     goto finish
 )
 echo Microsoft Office detected. Proceeding with Ohook activation.
-:: CI test seam: Windows Runtime CI drives the read-only detection above
-:: (against mocked registry + marker files) and stops here, before Ohook, so
-:: no activation or licensing mutation can ever run in CI.
-if /i "%OFFICE_DEPLOY_TEST_DETECT_ONLY%"=="1" (
-    echo TEST_DETECT_ONLY=1
-    goto finish
-)
 echo Activating your Office, please wait...
 call :oh_activate_core
 set "_activationExit=!ERRORLEVEL!"
@@ -322,12 +315,12 @@ call :dk_ckeckwmic
 call :dk_product
 call :dk_showosinfo
 call :oh_setspp
-call :oh_getpath
-:: Defense-in-depth fail-fast: if no supported Office was detected, abort
-:: before any per-product activation routine and before the unconditional
-:: :oh_clearblock / :oh_uninstkey / :oh_licrefresh cleanup calls below.
-:: This also protects the [1] post-install :activate path from running the
-:: mutating cleanup against an environment with no real Office present.
+call :oh_check_supported_office
+:: Defense-in-depth fail-fast: if no supported Office was detected (also
+:: catches a C2R install whose ClickToRun service is gone, via the shared
+:: helper), abort before any per-product activation routine and before the
+:: unconditional :oh_clearblock / :oh_uninstkey / :oh_licrefresh cleanup
+:: calls below. This also protects the [1] post-install :activate path.
 if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
     echo No supported Microsoft Office was found to activate.
     exit /b 1
@@ -631,6 +624,37 @@ set _License=
 exit /b
 
 ::========================================================================================================================================
+
+::  Supported-Office detector shared by :activate_existing (option [2]) and
+::  :oh_activate_core. Calls :oh_getpath (registry + marker file), then adds
+::  the MAS upstream C2R validity check: a ClickToRun install whose service
+::  is gone is treated as a broken install and cleared, so Ohook never runs
+::  against Office files that are no longer serviceable. Mirrors upstream
+::  Ohook_Activation_AIO.cmd (sc query ClickToRunSvc / OfficeSvc; 1060 means
+::  the service does not exist). Sets `error=1` when no supported Office
+::  remains, matching the upstream contract callers rely on. Defines %nul%
+::  itself so it works whether reached from :activate_existing (which only
+::  sets %nul6%) or from :oh_activate_core (which sets %nul%).
+:oh_check_supported_office
+set "nul=>nul 2>&1"
+call :oh_getpath
+sc query ClickToRunSvc %nul%
+set _ohSvcErr1=%errorlevel%
+sc query OfficeSvc %nul%
+set _ohSvcErr2=%errorlevel%
+if defined o16c2r if "%_ohSvcErr1%"=="1060" (
+    echo Checking ClickToRun Service             [Not found, Office 16.0 files found]
+    set "o16c2r="
+    set "error=1"
+)
+if defined o15c2r if "%_ohSvcErr1%"=="1060" if "%_ohSvcErr2%"=="1060" (
+    echo Checking ClickToRun Service             [Not found, Office 15.0 files found]
+    set "o15c2r="
+    set "error=1"
+)
+set "_ohSvcErr1="
+set "_ohSvcErr2="
+exit /b
 
 :oh_getpath
 
