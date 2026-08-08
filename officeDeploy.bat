@@ -1,6 +1,6 @@
 @set masver=3.10
 @echo off
-setlocal EnableDelayedExpansion
+setlocal EnableExtensions EnableDelayedExpansion
 title Microsoft Office Installation
 ::Installing Microsoft 365 Apps for enterprise. Writing by Kingson.
 
