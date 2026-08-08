@@ -1,6 +1,6 @@
 @set masver=3.10
 @echo off
-setlocal EnableDelayedExpansion
+setlocal EnableExtensions EnableDelayedExpansion
 title Microsoft Office Installation
 ::Installing Microsoft 365 Apps for enterprise. Writing by Kingson.
 
@@ -20,16 +20,22 @@ set "_log=%_logDir%\office-deploy.log"
 :: Stable CLI exit codes: 2 arguments, 10 admin, 20 environment, 30/31 ODT,
 :: 40 configuration, 50 install, 60 verification, 70 internal.
 
+:: Defensive stable script path for the Sysnative/SysArm32 relaunch lines.
+:: :parse_args below uses `shift /1`, which leaves %0 (the batch path)
+:: untouched, so %~f0 / %~dp0 remain valid everywhere after parsing. _self
+:: is kept as an explicit, parser-independent path for the relaunch lines.
+set "_self=%~f0"
+
 :parse_args
 if "%~1"=="" goto args_parsed
-if /i "%~1"=="--unattended" (set "_mode=unattended"&shift&goto parse_args)
-if /i "%~1"=="/unattended" (set "_mode=unattended"&shift&goto parse_args)
-if /i "%~1"=="--config-only" (set "_configOnly=1"&shift&goto parse_args)
-if /i "%~1"=="/config-only" (set "_configOnly=1"&shift&goto parse_args)
+if /i "%~1"=="--unattended" (set "_mode=unattended"&shift /1&goto parse_args)
+if /i "%~1"=="/unattended" (set "_mode=unattended"&shift /1&goto parse_args)
+if /i "%~1"=="--config-only" (set "_configOnly=1"&shift /1&goto parse_args)
+if /i "%~1"=="/config-only" (set "_configOnly=1"&shift /1&goto parse_args)
 if /i "%~1"=="--help" (call :show_help&endlocal&exit /b 0)
 if /i "%~1"=="/help" (call :show_help&endlocal&exit /b 0)
-if /i "%~1"=="re1" (set "_re1=1"&set "_nativeRelaunch=1"&shift&goto parse_args)
-if /i "%~1"=="re2" (set "_re2=1"&set "_nativeRelaunch=1"&shift&goto parse_args)
+if /i "%~1"=="re1" (set "_re1=1"&set "_nativeRelaunch=1"&shift /1&goto parse_args)
+if /i "%~1"=="re2" (set "_re2=1"&set "_nativeRelaunch=1"&shift /1&goto parse_args)
 echo [office-deploy] ERROR=Unknown argument.
 call :show_help
 endlocal&exit /b 2
@@ -85,7 +91,7 @@ if "%_configOnly%"=="1" set "_childArgs=!_childArgs! --config-only"
 if "%_re1%"=="1" set "_childArgs=!_childArgs! re1"
 if "%_re2%"=="1" set "_childArgs=!_childArgs! re2"
 if "%_configOnly%"=="0" if exist "%SystemRoot%\Sysnative\cmd.exe" if "%_re1%"=="0" (
-    "%SystemRoot%\Sysnative\cmd.exe" /d /s /c ""%~f0" !_childArgs! re1"
+    "%SystemRoot%\Sysnative\cmd.exe" /d /s /c ""%_self%" !_childArgs! re1"
     set "_nativeExit=!ERRORLEVEL!"
     for %%E in ("!_nativeExit!") do (
         endlocal
@@ -93,7 +99,7 @@ if "%_configOnly%"=="0" if exist "%SystemRoot%\Sysnative\cmd.exe" if "%_re1%"=="
     )
 )
 if "%_configOnly%"=="0" if exist "%SystemRoot%\SysArm32\cmd.exe" if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" if "%_re2%"=="0" (
-    "%SystemRoot%\SysArm32\cmd.exe" /d /s /c ""%~f0" !_childArgs! re2"
+    "%SystemRoot%\SysArm32\cmd.exe" /d /s /c ""%_self%" !_childArgs! re2"
     set "_nativeExit=!ERRORLEVEL!"
     for %%E in ("!_nativeExit!") do (
         endlocal
