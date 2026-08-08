@@ -1,8 +1,8 @@
 @set masver=3.10
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-title Microsoft Office Installation
-::Installing Microsoft 365 Apps for enterprise. Writing by Kingson.
+title Microsoft Office Deployment Utility
+::Microsoft Office deployment utility. Writing by Kingson.
 
 set "_mode=interactive"
 set "_configOnly=0"
@@ -109,10 +109,11 @@ if "%_configOnly%"=="0" if exist "%SystemRoot%\SysArm32\cmd.exe" if /i "%PROCESS
 
 cls
 echo ============================================================================
-echo Install Microsoft 365 Apps for enterprise
+echo Microsoft Office Deployment Utility
 echo ============================================================================&echo.
-echo #Supported products:
-echo - Microsoft 365 Apps for enterprise
+echo #Supported actions:
+echo - Install Microsoft 365 Apps for enterprise
+echo - Activate an installed Microsoft Office / Microsoft 365
 echo.
 
 :: Check administrator privilege
@@ -155,15 +156,17 @@ if !missing! EQU 0 (
 )
 
 :install
-echo Select one of the Office versions.
+echo Select an action.
 echo ----------------------------------------------------
-echo [1] Microsoft 365 Apps for enterprise
-echo [2] Exit
+echo [1] Install Microsoft 365 Apps for enterprise
+echo [2] Activate installed Office
+echo [3] Exit
 echo ----------------------------------------------------
-choice /c 12 /n /m "Please enter number: "
+choice /c 123 /n /m "Please enter number: "
 set "_choiceExit=!ERRORLEVEL!"
 if "!_choiceExit!"=="1" goto install1
-if "!_choiceExit!"=="2" goto finish
+if "!_choiceExit!"=="2" goto activate_existing
+if "!_choiceExit!"=="3" goto finish
 set "_exitCode=70"
 set "_result=FAILED"
 goto finish
@@ -250,6 +253,130 @@ echo Microsoft 365 Apps for enterprise activate failure
 set "_exitCode=70"
 set "_result=FAILED"
 goto finish
+
+::========================================================================
+::  Activate installed Office entry point.
+::  Thin interactive control layer for option [2] of the menu.
+::  Reads and (via supported Microsoft mechanisms) activates Office that is
+::  ALREADY installed on this machine. It must never download Office, never
+::  reinstall Office, and never touch the ODT / Configuration.xml path.
+::  It is intentionally decoupled from the legacy :activate / :oh_activate_core
+::  path and relies only on read-only detection helpers plus Microsoft's own
+::  supported activation components.
+:activate_existing
+set "_stage=ACTIVATE_EXISTING"
+echo ----------------------------------------------------
+echo Checking for an installed Microsoft Office...
+call :detect_office_installation
+set "_detectExit=!ERRORLEVEL!"
+if not "!_detectExit!"=="0" (
+    echo No supported Microsoft Office installation was found.
+    set "_exitCode=70"
+    set "_result=FAILED"
+    goto finish
+)
+echo Installed Office detected:
+if defined _aoType        echo   Type        : !_aoType!
+if defined _aoVersion     echo   Version     : !_aoVersion!
+if defined _aoPlatform    echo   Architecture: !_aoPlatform!
+if defined _aoInstallPath echo   Install path: !_aoInstallPath!
+echo.
+call :get_office_license_status
+set "_licenseExit=!ERRORLEVEL!"
+echo License status: !_aoLicenseState!
+if defined _aoGraceEnd    echo   License ends: !_aoGraceEnd!
+echo.
+if /i "!_aoLicenseState!"=="LICENSED" (
+    echo Microsoft Office is already activated.
+    goto finish
+)
+if /i "!_aoLicenseState!"=="SUBSCRIPTION_SIGNIN_REQUIRED" (
+    echo This Office uses a subscription license.
+    echo Open an Office application and sign in with the Microsoft account
+    echo that owns the Microsoft 365 license, or with your Work or School account.
+    goto finish
+)
+:: For volume/perpetual SKUs that are licensed but not yet active, refresh the
+:: Software Protection Platform via the official service. This is the same
+:: mechanism Windows/Office use natively; it installs no product key, writes no
+:: licensing registry, and modifies no Office files.
+if /i "!_aoLicenseState!"=="UNLICENSED" (
+    echo Attempting supported Microsoft activation...
+    sc query sppsvc >nul 2>nul
+    if !ERRORLEVEL! EQU 0 (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $svc = Get-WmiObject SoftwareLicensingService; if ($null -ne $svc) { $null = $svc.RefreshLicenseStatus(); 'REFRESH=OK' } else { 'REFRESH=NO_SERVICE' } } catch { 'REFRESH=ERROR' }" 2>nul
+    ) else (
+        echo Software Protection Platform service is not available.
+    )
+    echo.
+    call :get_office_license_status
+    set "_licenseExit=!ERRORLEVEL!"
+    echo License status after refresh: !_aoLicenseState!
+    if /i "!_aoLicenseState!"=="LICENSED" (
+        echo Microsoft Office is now activated.
+        goto finish
+    )
+    echo Office could not be activated through the supported path.
+    echo If this is a subscription, open an Office application and sign in with
+    echo the Microsoft account that owns the Microsoft 365 license.
+    echo If this is a perpetual/volume SKU, install its product key through
+    echo Microsoft's official channels and rerun this option.
+    set "_exitCode=70"
+    set "_result=FAILED"
+    goto finish
+)
+echo Unable to determine the Office license state.
+echo Open an Office application; if it prompts for activation, follow the
+echo on-screen Microsoft instructions or sign in with the Microsoft account
+echo that owns the license.
+set "_exitCode=70"
+set "_result=FAILED"
+goto finish
+
+::========================================================================
+::  Read-only Office installation detector for :activate_existing.
+::  Sets: _aoType, _aoVersion, _aoPlatform, _aoInstallPath
+::  Exit 0 = supported Office found, non-zero = none found.
+::  This is deliberately independent of the legacy :oh_getpath detector and
+::  performs only read-only registry/file inspection. It installs no key,
+::  writes no licensing registry, writes/modifies no DLL, creates no hook,
+::  clears no license cache, and never invokes Ohook.
+:detect_office_installation
+set "_aoType="
+set "_aoVersion="
+set "_aoPlatform="
+set "_aoInstallPath="
+set "_aoDetectOut=%TEMP%\office-deploy-detect-!RANDOM!.txt"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$keys=@('HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\WOW64Node\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration','HKLM:\SOFTWARE\WOW64Node\Microsoft\Office\15.0\ClickToRun\Configuration'); $c=$null; foreach($k in $keys){try{$c=Get-ItemProperty -LiteralPath $k -ErrorAction Stop;break}catch{}}; if($null -ne $c){$p=[string]$c.InstallationPath; $v=[string]$c.VersionToReport; $a=[string]$c.Platform; $ids=[string]$c.ProductReleaseIds; if(-not [string]::IsNullOrWhiteSpace($v)){ 'AO_TYPE=ClickToRun'; 'AO_VERSION='+$v; 'AO_PLATFORM='+$a; 'AO_INSTALLPATH='+$p; 'AO_PRODUCTIDS='+$ids; exit 0 }}; $msi=@{16='HKLM:\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot';15='HKLM:\SOFTWARE\Microsoft\Office\15.0\Common\InstallRoot';14='HKLM:\SOFTWARE\Microsoft\Office\14.0\Common\InstallRoot'}; foreach($ver in $msi.Keys){try{$r=Get-ItemProperty -LiteralPath $msi[$ver] -Name Path -ErrorAction Stop}catch{$r=$null}; if($null -ne $r -and -not [string]::IsNullOrWhiteSpace($r.Path)){'AO_TYPE=MSI'; 'AO_VERSION='+$ver+'.0'; 'AO_PLATFORM='; 'AO_INSTALLPATH='+$r.Path; exit 0}}; exit 1" > "%_aoDetectOut%" 2>nul
+set "_detectCmdExit=!ERRORLEVEL!"
+if exist "%_aoDetectOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_aoDetectOut%") do (
+    if /i "%%A"=="AO_TYPE" set "_aoType=%%B"
+    if /i "%%A"=="AO_VERSION" set "_aoVersion=%%B"
+    if /i "%%A"=="AO_PLATFORM" set "_aoPlatform=%%B"
+    if /i "%%A"=="AO_INSTALLPATH" set "_aoInstallPath=%%B"
+)
+del /q "%_aoDetectOut%" >nul 2>nul
+exit /b %_detectCmdExit%
+
+::========================================================================
+::  Read-only Office license-status detector for :activate_existing.
+::  Sets: _aoLicenseState, _aoGraceEnd
+::  Exit 0 always (status determined, even if UNABLE_TO_DETERMINE).
+::  Uses only Microsoft's own Software Licensing / Office Software Protection
+::  components in read-only mode. It writes no registry, installs no product
+::  key, clears no license, modifies no token, and modifies no Office file.
+:get_office_license_status
+set "_aoLicenseState=UNABLE_TO_DETERMINE"
+set "_aoGraceEnd="
+set "_aoLicOut=%TEMP%\office-deploy-license-!RANDOM!.txt"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$appId='0ff1ce15-a989-479d-af46-f275c6370663'; $state='UNABLE_TO_DETERMINE'; $grace=''; $have=$false; try { $prods = @(); try { $prods = Get-WmiObject SoftwareLicensingProduct -ErrorAction Stop | Where-Object { $_.ApplicationID -eq $appId -and $null -ne $_.PartialProductKey } } catch {}; if($prods.Count -gt 0){$have=$true; $lic=$null; foreach($p in $prods){ if($p.LicenseStatus -eq 1){ $lic=$p; break } }; if($null -ne $lic){ $state='LICENSED' } else { $sub=$false; foreach($p in $prods){ if($p.Name -match 'Subscription|365'){ $sub=$true } }; if($sub){ $state='SUBSCRIPTION_SIGNIN_REQUIRED' } else { $state='UNLICENSED'; try { $g=$prods[0].GracePeriodRemaining; if($g -gt 0){ $days=[math]::Floor($g/1440); $grace='~'+$days+' day(s) remaining' } } catch {} } } } } catch {}; if(-not $have){ try { if(Test-Path 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\Tokens\Sku') { $have=$true; $state='UNLICENSED' } } catch {} }; 'AO_LICENSE_STATE='+$state; 'AO_GRACE_END='+$grace; exit 0" > "%_aoLicOut%" 2>nul
+if exist "%_aoLicOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_aoLicOut%") do (
+    if /i "%%A"=="AO_LICENSE_STATE" set "_aoLicenseState=%%B"
+    if /i "%%A"=="AO_GRACE_END" set "_aoGraceEnd=%%B"
+)
+del /q "%_aoLicOut%" >nul 2>nul
+if not defined _aoLicenseState set "_aoLicenseState=UNABLE_TO_DETERMINE"
+exit /b 0
 
 :oh_activate_core
 :: Set script path variables needed by Ohook functions

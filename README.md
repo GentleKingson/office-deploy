@@ -38,9 +38,20 @@ Run **Command Prompt or Windows Terminal as Administrator**, then execute:
 officeDeploy.bat
 ```
 
-The interactive mode displays the product menu and performs the normal interactive installation flow.
+The interactive mode displays an action menu:
 
-> Interactive mode retains the repository's existing legacy post-install activation path. Review the source and applicable software licensing requirements before using that path.
+```text
+[1] Install Microsoft 365 Apps for enterprise
+[2] Activate an existing Office installation
+[3] Exit
+```
+
+- `[1] Install` performs the normal interactive Microsoft 365 installation flow.
+- `[2] Activate installed Office` only acts on Office that is already installed. It checks the installed Office licensing state and uses only supported Microsoft activation paths. It does not download or reinstall Office.
+
+> The activation option checks the installed Office licensing state and uses only supported Microsoft activation paths. GitHub Actions does not execute Office activation.
+>
+> The `[1] Install` flow retains the repository's existing legacy post-install activation path. Review the source and applicable software licensing requirements before using that path.
 
 ### Unattended installation
 
@@ -89,7 +100,7 @@ officeDeploy.bat --help
 
 | Command | Description |
 |---|---|
-| `officeDeploy.bat` | Interactive deployment |
+| `officeDeploy.bat` | Interactive menu: install Microsoft 365, activate installed Office, or exit |
 | `officeDeploy.bat --unattended` | Full unattended deployment |
 | `officeDeploy.bat --unattended --config-only` | Generate and validate configuration only |
 | `officeDeploy.bat --help` | Display command usage |
@@ -352,7 +363,8 @@ Coverage includes:
 - real 32-bit `SysWOW64\cmd.exe` execution;
 - WOW64 → `Sysnative` relaunch;
 - native child → parent exit-code propagation;
-- native child `SCRIPT_PATH` preservation.
+- native child `SCRIPT_PATH` preservation;
+- interactive menu rendering and Exit mapping (`T11`).
 
 See:
 

@@ -350,6 +350,56 @@ jobs:
           echo [T9] PASS invalid-cache-recovery-exit=31 no-network no-install
           exit /b 0
 
+      # ----------------------------------------------------------------------
+      # T11: interactive menu runtime verification. This is the only test that
+      # exercises the interactive menu. It pipes "3" to choose Exit, so the
+      # menu is rendered, the Exit branch is taken, and NO installation or
+      # activation path is entered. This deliberately never sends "2", so no
+      # activation logic is executed in CI.
+      # ----------------------------------------------------------------------
+      - name: T11 Interactive menu
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\interactive" >nul 2>nul
+          mkdir "%ROOT%\interactive\temp" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\interactive\officeDeploy.bat" >nul
+
+          set "TEMP=%ROOT%\interactive\temp"
+          set "TMP=%ROOT%\interactive\temp"
+
+          :: choice /c 123 reads the first key and returns; the trailing CR/LF
+          :: from echo is then consumed by the interactive "pause" at :finish.
+          echo 3| call "%ROOT%\interactive\officeDeploy.bat" > "%ROOT%\interactive\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+
+          :: Exit mapping for option [3] must be exit 0.
+          if not "!RC!"=="0" ( echo [T11] FAIL: expected exit 0, got !RC! & type "%ROOT%\interactive\run.out" & exit /b 1 )
+
+          :: The three menu options must be rendered exactly.
+          findstr /c:"[1] Install Microsoft 365 Apps for enterprise" "%ROOT%\interactive\run.out" >nul || ( echo [T11] FAIL: option [1] missing & exit /b 1 )
+          findstr /c:"[2] Activate installed Office" "%ROOT%\interactive\run.out" >nul || ( echo [T11] FAIL: option [2] missing & exit /b 1 )
+          findstr /c:"[3] Exit" "%ROOT%\interactive\run.out" >nul || ( echo [T11] FAIL: option [3] missing & exit /b 1 )
+
+          :: Neutral header title is now rendered.
+          findstr /c:"Microsoft Office Deployment Utility" "%ROOT%\interactive\run.out" >nul || ( echo [T11] FAIL: neutral title missing & exit /b 1 )
+
+          :: Guards: choosing Exit must NOT reach the install/activate paths.
+          if exist "%ROOT%\interactive\Configuration.xml" ( echo [T11] FAIL: Configuration.xml leaked & exit /b 1 )
+          if exist "%ROOT%\interactive\setup.exe" ( echo [T11] FAIL: setup.exe leaked & exit /b 1 )
+          if exist "%ROOT%\interactive\setup.exe.download.tmp" ( echo [T11] FAIL: tmp leaked & exit /b 1 )
+          findstr /c:"STAGE=INSTALL" "%ROOT%\interactive\run.out" >nul && ( echo [T11] FAIL: reached Office install stage & exit /b 1 )
+          findstr /c:"Checking for an installed Microsoft Office" "%ROOT%\interactive\run.out" >nul && ( echo [T11] FAIL: reached activation path & exit /b 1 )
+
+          :: Static structural assertion: option [2] dispatches to the new
+          :: activate-installed-Office entry, and that entry label exists.
+          findstr /c:"goto activate_existing" "%ROOT%\interactive\officeDeploy.bat" >nul || ( echo [T11] FAIL: menu does not dispatch to activate_existing & exit /b 1 )
+          findstr /b /c:":activate_existing" "%ROOT%\interactive\officeDeploy.bat" >nul || ( echo [T11] FAIL: :activate_existing label missing & exit /b 1 )
+
+          echo [T11] PASS interactive-menu-rendered exit-mapping=0 no-install no-activation
+          exit /b 0
+
       - name: Upload runtime-contract artifacts
         if: always()
         uses: actions/upload-artifact@v4
