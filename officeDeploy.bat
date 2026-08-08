@@ -182,6 +182,8 @@ call :write_config
 set "_configExit=!ERRORLEVEL!"
 if not "!_configExit!"=="0" (
     echo Failed to generate or validate configuration file.
+    echo Configuration path: %_cfg%
+    echo Configuration generation failed: !_configResult!
     set "_exitCode=40"
     set "_result=FAILED"
     goto finish
@@ -466,14 +468,46 @@ echo   ^<Display Level="%_displayLevel%" AcceptEULA="TRUE" /^>
 echo ^</Configuration^>
 ) > "%_cfg%"
 set "_configWriteExit=!ERRORLEVEL!"
-if not "!_configWriteExit!"=="0" exit /b 1
-if not exist "%_cfg%" exit /b 1
+if not "!_configWriteExit!"=="0" (
+    set "_configResult=CONFIG_WRITE_FAILED"
+    if /i "%_mode%"=="unattended" call :log "CONFIG_WRITE_EXIT_CODE=!_configWriteExit!"
+    if /i "%_mode%"=="unattended" call :log "CONFIG_RESULT=CONFIG_WRITE_FAILED"
+    exit /b 1
+)
+if not exist "%_cfg%" (
+    set "_configResult=CONFIG_FILE_NOT_CREATED"
+    if /i "%_mode%"=="unattended" call :log "CONFIG_RESULT=CONFIG_FILE_NOT_CREATED"
+    exit /b 1
+)
 for %%A in ("%_cfg%") do set "_cfgSize=%%~zA"
-if not defined _cfgSize exit /b 1
-if !_cfgSize! LEQ 0 exit /b 1
+if not defined _cfgSize (
+    set "_configResult=CONFIG_FILE_NOT_CREATED"
+    if /i "%_mode%"=="unattended" call :log "CONFIG_RESULT=CONFIG_FILE_NOT_CREATED"
+    exit /b 1
+)
+if !_cfgSize! LEQ 0 (
+    set "_configResult=CONFIG_FILE_EMPTY"
+    if /i "%_mode%"=="unattended" call :log "CONFIG_RESULT=CONFIG_FILE_EMPTY"
+    exit /b 1
+)
+where powershell >nul 2>nul
+set "_psExit=!ERRORLEVEL!"
+if not "!_psExit!"=="0" (
+    set "_configResult=POWERSHELL_NOT_FOUND"
+    if /i "%_mode%"=="unattended" call :log "CONFIG_RESULT=POWERSHELL_NOT_FOUND"
+    exit /b 1
+)
+if /i "%_mode%"=="unattended" call :log "CONFIG_SIZE=!_cfgSize!"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $null=[xml](Get-Content -LiteralPath ([Environment]::GetEnvironmentVariable('_cfg')) -Raw); exit 0 } catch { Write-Error $_; exit 1 }"
 set "_xmlExit=!ERRORLEVEL!"
-if not "!_xmlExit!"=="0" exit /b 1
+if not "!_xmlExit!"=="0" (
+    set "_configResult=CONFIG_XML_INVALID"
+    if /i "%_mode%"=="unattended" call :log "CONFIG_XML_EXIT_CODE=!_xmlExit!"
+    if /i "%_mode%"=="unattended" call :log "CONFIG_RESULT=CONFIG_XML_INVALID"
+    exit /b 1
+)
+set "_configResult=CONFIG_OK"
+if /i "%_mode%"=="unattended" call :log "CONFIG_RESULT=CONFIG_OK"
 exit /b 0
 
 :verify_office_install
