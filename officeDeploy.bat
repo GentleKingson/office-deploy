@@ -315,6 +315,12 @@ call :dk_ckeckwmic
 call :dk_product
 call :dk_showosinfo
 call :oh_setspp
+:: Reset `error` BEFORE the shared detector, then let the detector set
+:: error=1 if it finds a broken C2R install (files present but service
+:: gone). This matches MAS upstream ordering: reset, then detect, then
+:: carry any error through to the final result. A leftover error from a
+:: caller (e.g. [2] preflight) is also cleared here.
+set error=
 call :oh_check_supported_office
 :: Defense-in-depth fail-fast: if no supported Office was detected (also
 :: catches a C2R install whose ClickToRun service is gone, via the shared
@@ -325,7 +331,6 @@ if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined
     echo No supported Microsoft Office was found to activate.
     exit /b 1
 )
-set error=
 echo:
 echo Activating Office...
 :: Process Office 16.0 C2R
@@ -631,10 +636,12 @@ exit /b
 ::  is gone is treated as a broken install and cleared, so Ohook never runs
 ::  against Office files that are no longer serviceable. Mirrors upstream
 ::  Ohook_Activation_AIO.cmd (sc query ClickToRunSvc / OfficeSvc; 1060 means
-::  the service does not exist). Sets `error=1` when no supported Office
-::  remains, matching the upstream contract callers rely on. Defines %nul%
-::  itself so it works whether reached from :activate_existing (which only
-::  sets %nul6%) or from :oh_activate_core (which sets %nul%).
+::  the service does not exist). Sets `error=1` when a C2R candidate is
+::  judged broken (service missing) -- even if another valid Office (e.g.
+::  MSI) remains on the machine. Callers reset `error` BEFORE calling this
+::  helper, matching upstream ordering, so the error survives to the result.
+::  Defines %nul% itself so it works whether reached from :activate_existing
+::  (which only sets %nul6%) or from :oh_activate_core (which sets %nul%).
 :oh_check_supported_office
 set "nul=>nul 2>&1"
 call :oh_getpath

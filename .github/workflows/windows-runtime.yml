@@ -423,6 +423,8 @@ jobs:
       #   B: 32-bit MSI           (Wow6432Node + *Picker.dll)            PASS
       #   C: registry present but NO marker file         -> REJECTED (70)
       #   D: registry + marker but NO ClickToRun service -> REJECTED (70)
+      #   E: broken C2R + valid MSI mixed -> o16c2r cleared, o16msi kept,
+      #      error=1 survives (locks the set error= ordering fix)
       # Also guards the Wow6432Node spelling so the 32-bit regression cannot
       # silently return.
       # ----------------------------------------------------------------------
@@ -529,6 +531,48 @@ jobs:
           findstr /c:"Microsoft Office detected" "%ROOT%\activate-detect\d.out" >nul && ( echo [T12d] FAIL: falsely detected despite missing service & exit /b 1 )
           findstr /c:"Activating your Office" "%ROOT%\activate-detect\d.out" >nul && ( echo [T12d] FAIL: reached Ohook activation & exit /b 1 )
           echo [T12d] PASS registry+marker-without-service rejected exit=70 no-ohook
+
+          :: ---- Scenario E: broken C2R + valid MSI mixed (detector only) ----
+          :: Drives the shared detector directly (no Ohook) to prove that a
+          :: broken C2R (marker present, ClickToRunSvc absent) is cleared
+          :: while a valid MSI is retained, AND that error=1 survives -- it
+          :: is not swallowed by a misplaced reset. This locks the upstream
+          :: ordering fix (set error= BEFORE the detector in :oh_activate_core).
+          :: Start from a FRESH copy (so scenario A's goto-finish injection
+          :: does not interfere), then inject a top dispatcher that jumps to
+          :: a :t12e_probe label which runs ONLY the detector and prints
+          :: flag/error state. Production bat is untouched.
+          for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
+          sc delete ClickToRunSvc >nul 2>nul
+          :: Broken C2R: registry + marker, but NO service.
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f /v InstallPath /t REG_SZ /d "C:\MixC2R" >nul || ( echo [T12e] FAIL: reg add C2R & exit /b 1 )
+          mkdir "C:\MixC2R\root\Licenses16" >nul 2>nul
+          echo dummy-license > "C:\MixC2R\root\Licenses16\ProPlusDummy.xrm-ms"
+          :: Valid MSI (64-bit view) with its marker file.
+          reg add "HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot" /f /v Path /t REG_SZ /d "C:\MixMSI" >nul || ( echo [T12e] FAIL: reg add MSI & exit /b 1 )
+          mkdir "C:\MixMSI" >nul 2>nul
+          echo dummy-picker > "C:\MixMSI\DummyPicker.dll"
+
+          copy /y "officeDeploy.bat" "%ROOT%\activate-detect\probe.bat" >nul
+          powershell -NoProfile -Command "$f='%ROOT%\activate-detect\probe.bat'; $t=[IO.File]::ReadAllText($f); $old=\"@set masver=3.10\"; $dispatch=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif defined _T12E_PROBE ( goto :t12e_probe )`r`n@set masver=3.10\"; $probe=\"`r`n:t12e_probe`r`nset error=`r`nset \"nul6=2^>nul\"`r`ncall :oh_check_supported_office`r`necho PROBE_o16c2r=!o16c2r!`r`necho PROBE_o16msi=!o16msi!`r`necho PROBE_error=!error!`r`nexit /b 0`r`n\"; if(-not $t.StartsWith($old)){exit 1}; $t=$dispatch + $t.Substring($old.Length) + $probe; [IO.File]::WriteAllText($f,$t); exit 0"
+          if !ERRORLEVEL! NEQ 0 ( echo [T12e] FAIL: probe injection failed & exit /b 1 )
+
+          set "_T12E_PROBE=1"
+          call "%ROOT%\activate-detect\probe.bat" > "%ROOT%\activate-detect\e.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          set "_T12E_PROBE="
+
+          if not "!RC!"=="0" ( echo [T12e] FAIL: probe returned !RC! & type "%ROOT%\activate-detect\e.out" & exit /b 1 )
+          :: Broken C2R must have been cleared (empty value after =).
+          findstr /c:"PROBE_o16c2r=" "%ROOT%\activate-detect\e.out" >nul || ( echo [T12e] FAIL: probe o16c2r line missing & type "%ROOT%\activate-detect\e.out" & exit /b 1 )
+          findstr /c:"PROBE_o16c2r=1" "%ROOT%\activate-detect\e.out" >nul && ( echo [T12e] FAIL: o16c2r not cleared & exit /b 1 )
+          :: Valid MSI must be retained.
+          findstr /c:"PROBE_o16msi=1" "%ROOT%\activate-detect\e.out" >nul || ( echo [T12e] FAIL: o16msi not retained & type "%ROOT%\activate-detect\e.out" & exit /b 1 )
+          :: error must be 1 (broken C2R detected) and NOT swallowed.
+          findstr /c:"PROBE_error=1" "%ROOT%\activate-detect\e.out" >nul || ( echo [T12e] FAIL: error not set to 1 & type "%ROOT%\activate-detect\e.out" & exit /b 1 )
+          :: Service-check message must appear.
+          findstr /c:"Not found, Office 16.0 files found" "%ROOT%\activate-detect\e.out" >nul || ( echo [T12e] FAIL: service-check message missing & type "%ROOT%\activate-detect\e.out" & exit /b 1 )
+          echo [T12e] PASS mixed broken-c2r+valid-msi o16c2r-cleared o16msi-retained error=1
 
           :: ---- Static guards: Wow6432Node spelling must not regress ----
           findstr /c:"WOW64Node\Microsoft" "%ROOT%\activate-detect\officeDeploy.bat" >nul && ( echo [T12] FAIL: WOW64Node typo present & exit /b 1 )
