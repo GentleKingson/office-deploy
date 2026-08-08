@@ -345,9 +345,15 @@ jobs:
           set "TEMP=%ROOT%\wow64\temp"
           set "TMP=%ROOT%\wow64\temp"
 
-          :: Sanity: the runner must expose real SysWOW64 and Sysnative cmd.
+          :: Sanity: the runner must expose a real 32-bit CMD. (SysWOW64 is
+          :: visible from this 64-bit wrapper CMD.) Note we deliberately do
+          :: NOT preflight Sysnative here: %SystemRoot%\Sysnative is a virtual
+          :: alias only visible to 32-bit (WOW64) processes, so it is absent
+          :: from this 64-bit wrapper. officeDeploy.bat checks it from inside
+          :: the 32-bit process where it is resolvable; the proof that the
+          :: native relaunch actually happened is the NATIVE_RELAUNCH=1 marker
+          :: in the native-child log plus the propagated outermost exit code.
           if not exist "%SystemRoot%\SysWOW64\cmd.exe" ( echo [T10] FAIL: SysWOW64\cmd.exe missing & exit /b 1 )
-          if not exist "%SystemRoot%\Sysnative\cmd.exe" ( echo [T10] FAIL: Sysnative\cmd.exe missing & exit /b 1 )
 
           :: To avoid fragile nested-quote parsing across two layers of cmd,
           :: generate a tiny wrapper bat and let the 32-bit CMD run it. The
