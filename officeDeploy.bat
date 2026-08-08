@@ -257,59 +257,39 @@ goto finish
 ::========================================================================
 ::  Activate installed Office entry point.
 ::  Interactive control layer for option [2] of the menu.
-::  Detects Office that is ALREADY installed on this machine, then activates
-::  it by directly reusing the script's existing Ohook activation capability
-::  (:oh_activate_core, the same implementation used by the post-install
-::  :activate path). It must never download Office, never reinstall Office,
-::  and never touch the ODT / Configuration.xml path.
+::  Detects Office that is ALREADY installed on this machine by reusing the
+::  script's own MAS-derived :oh_getpath detector (the exact contract Ohook
+::  itself relies on: registry key AND marker file, 32/64-bit aware), then
+::  activates it through the existing :oh_activate_core Ohook implementation
+::  (the same one used by the post-install :activate path). It never downloads
+::  or reinstalls Office, never touches the ODT / Configuration.xml path, and
+::  has no second, weaker detector or a WMI license classifier of its own.
+::  Ohook is idempotent, so re-running [2] is safe; it reinstalls cleanly.
 :activate_existing
 set "_stage=ACTIVATE_EXISTING"
 echo ----------------------------------------------------
 echo Checking for an installed Microsoft Office...
-call :detect_office_installation
-set "_detectExit=!ERRORLEVEL!"
-if not "!_detectExit!"=="0" (
+:: Read-only preflight. :oh_getpath only needs %nul6% defined; it sets its
+:: own _86/_68, reads only the registry + Office marker files, and writes
+:: nothing. It sets o16c2r/o15c2r/o16msi/o15msi/o14msi when a supported
+:: Office is really present. (:oh_activate_core redefines nul6 itself, so
+:: setting it here only satisfies the preflight and is harmless afterwards.)
+set "nul6=2^>nul"
+call :oh_getpath
+if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
     echo No supported Microsoft Office installation was found.
     set "_exitCode=70"
     set "_result=FAILED"
     goto finish
 )
-echo Installed Office detected:
-echo   Type        : !_aoType!
-echo   Version     : !_aoVersion!
-if defined _aoPlatform    echo   Architecture: !_aoPlatform!
-if defined _aoInstallPath echo   Install path: !_aoInstallPath!
-if defined _aoProductIds  echo   Products    : !_aoProductIds!
-echo.
-call :get_office_license_status
-set "_licenseExit=!ERRORLEVEL!"
-echo License status: !_aoLicenseState!
-if defined _aoOfficeCount   echo   Office licenses: !_aoLicensedCount!/!_aoOfficeCount! activated
-if defined _aoGraceEnd      echo   License ends: !_aoGraceEnd!
-echo.
-if /i "!_aoLicenseState!"=="LICENSED" (
-    echo Microsoft Office is already activated.
-    goto finish
-)
-:: PARTIALLY_LICENSED means at least one Office product is still unlicensed
-:: (e.g. Office + Project/Visio, multiple versions, or leftover license
-:: objects); do NOT let the licensed product mask the rest -- run Ohook so
-:: every detected product ends up activated.
-if /i "!_aoLicenseState!"=="PARTIALLY_LICENSED" (
-    echo Some Office products are licensed but at least one is not.
-    echo Activating the remaining products below.
-)
-:: CI test seam: with OFFICE_DEPLOY_TEST_DETECT_ONLY=1 the option reports the
-:: read-only detection/license results and exits without invoking Ohook.
-:: This lets Windows Runtime CI exercise the [2] control flow against mocked
-:: registry fixtures without ever executing activation.
+echo Microsoft Office detected. Proceeding with Ohook activation.
+:: CI test seam: Windows Runtime CI drives the read-only detection above
+:: (against mocked registry + marker files) and stops here, before Ohook, so
+:: no activation or licensing mutation can ever run in CI.
 if /i "%OFFICE_DEPLOY_TEST_DETECT_ONLY%"=="1" (
     echo TEST_DETECT_ONLY=1
     goto finish
 )
-:: Reuse the script's existing Ohook activation (the same capability the
-:: post-install path uses). It handles C2R 15/16 and MSI 14/15/16 alike;
-:: the Ohook diagnostics above/below report which product was activated.
 echo Activating your Office, please wait...
 call :oh_activate_core
 set "_activationExit=!ERRORLEVEL!"
@@ -323,66 +303,6 @@ if "!_activationExit!"=="0" (
     set "_result=FAILED"
 )
 goto finish
-
-::========================================================================
-::  Read-only Office installation detector for :activate_existing.
-::  Sets: _aoType, _aoVersion, _aoPlatform, _aoInstallPath
-::  Exit 0 = supported Office found, non-zero = none found.
-::  This helper itself is read-only (registry/file inspection only); it
-::  installs no key, writes no licensing registry, writes/modifies no DLL,
-::  creates no hook, and clears no license cache. Activation itself is
-::  delegated to the script's existing :oh_activate_core implementation.
-:detect_office_installation
-set "_aoType="
-set "_aoVersion="
-set "_aoPlatform="
-set "_aoInstallPath="
-set "_aoProductIds="
-set "_aoDetectOut=%TEMP%\office-deploy-detect-!RANDOM!.txt"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$keys=@('HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\15.0\ClickToRun\Configuration'); $c=$null; foreach($k in $keys){try{$c=Get-ItemProperty -LiteralPath $k -ErrorAction Stop;break}catch{}}; if($null -ne $c){$p=[string]$c.InstallationPath; $v=[string]$c.VersionToReport; $a=[string]$c.Platform; $ids=[string]$c.ProductReleaseIds; if(-not [string]::IsNullOrWhiteSpace($v)){ 'AO_TYPE=ClickToRun'; 'AO_VERSION='+$v; 'AO_PLATFORM='+$a; 'AO_INSTALLPATH='+$p; 'AO_PRODUCTIDS='+$ids; exit 0 }}; $msi=@('HKLM:\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot','HKLM:\SOFTWARE\Microsoft\Office\15.0\Common\InstallRoot','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\15.0\Common\InstallRoot','HKLM:\SOFTWARE\Microsoft\Office\14.0\Common\InstallRoot','HKLM:\SOFTWARE\Wow6432Node\Microsoft\Office\14.0\Common\InstallRoot'); foreach($r in $msi){try{$v=Get-ItemProperty -LiteralPath $r -Name Path -ErrorAction Stop}catch{$v=$null}; if($null -ne $v -and -not [string]::IsNullOrWhiteSpace($v.Path)){if($r -match 'Office\\(14|15|16)\.0\\Common\\InstallRoot'){'AO_TYPE=MSI'; 'AO_VERSION='+$Matches[1]+'.0'; 'AO_PLATFORM='; 'AO_INSTALLPATH='+$v.Path; exit 0}}}; exit 1" > "%_aoDetectOut%" 2>nul
-set "_detectCmdExit=!ERRORLEVEL!"
-if exist "%_aoDetectOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_aoDetectOut%") do (
-    if /i "%%A"=="AO_TYPE" set "_aoType=%%B"
-    if /i "%%A"=="AO_VERSION" set "_aoVersion=%%B"
-    if /i "%%A"=="AO_PLATFORM" set "_aoPlatform=%%B"
-    if /i "%%A"=="AO_INSTALLPATH" set "_aoInstallPath=%%B"
-    if /i "%%A"=="AO_PRODUCTIDS" set "_aoProductIds=%%B"
-)
-del /q "%_aoDetectOut%" >nul 2>nul
-exit /b %_detectCmdExit%
-
-::========================================================================
-::  Read-only Office license-status detector for :activate_existing.
-::  Sets: _aoLicenseState, _aoLicensedCount, _aoOfficeCount, _aoGraceEnd
-::  Exit 0 always (status determined, even if UNABLE_TO_DETERMINE).
-::  Classifies EVERY SoftwareLicensingProduct that belongs to the Office
-::  ApplicationID and carries a partial product key, then derives the state
-::  from the whole detected set (not from any single product), so one
-::  licensed SKU cannot mask another unlicensed one:
-::    all licensed               -> LICENSED
-::    some licensed              -> PARTIALLY_LICENSED
-::    none licensed              -> UNLICENSED
-::    no Office license objects  -> UNLICENSED (nothing to activate)
-::    licensing query failed     -> UNABLE_TO_DETERMINE
-::  Uses only Microsoft's own Software Licensing components in read-only
-::  mode. It writes no registry, installs no product key, clears no
-::  license, modifies no token, and modifies no Office file.
-:get_office_license_status
-set "_aoLicenseState=UNABLE_TO_DETERMINE"
-set "_aoLicensedCount=0"
-set "_aoOfficeCount=0"
-set "_aoGraceEnd="
-set "_aoLicOut=%TEMP%\office-deploy-license-!RANDOM!.txt"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$appId='0ff1ce15-a989-479d-af46-f275c6370663'; $state='UNABLE_TO_DETERMINE'; $grace=''; $licensed=0; $count=0; $ok=$false; try { $prods = Get-WmiObject SoftwareLicensingProduct -ErrorAction Stop | Where-Object { $_.ApplicationID -eq $appId -and $null -ne $_.PartialProductKey }; $ok=$true; foreach($p in $prods){ $count=$count+1; if($p.LicenseStatus -eq 1){ $licensed=$licensed+1 } else { try { $g=$p.GracePeriodRemaining; if($g -gt 0){ $days=[math]::Floor($g/1440); $grace='~'+$days+' day(s) remaining' } } catch {} } } } catch { $state='UNABLE_TO_DETERMINE' }; if($ok){ if($count -gt 0){ if($licensed -eq $count){ $state='LICENSED' } else { if($licensed -gt 0){ $state='PARTIALLY_LICENSED' } else { $state='UNLICENSED' } } } else { $state='UNLICENSED' } }; 'AO_LICENSE_STATE='+$state; 'AO_LICENSED_COUNT='+$licensed; 'AO_OFFICE_COUNT='+$count; 'AO_GRACE_END='+$grace; exit 0" > "%_aoLicOut%" 2>nul
-if exist "%_aoLicOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_aoLicOut%") do (
-    if /i "%%A"=="AO_LICENSE_STATE" set "_aoLicenseState=%%B"
-    if /i "%%A"=="AO_LICENSED_COUNT" set "_aoLicensedCount=%%B"
-    if /i "%%A"=="AO_OFFICE_COUNT" set "_aoOfficeCount=%%B"
-    if /i "%%A"=="AO_GRACE_END" set "_aoGraceEnd=%%B"
-)
-del /q "%_aoLicOut%" >nul 2>nul
-if not defined _aoLicenseState set "_aoLicenseState=UNABLE_TO_DETERMINE"
-exit /b 0
 
 :oh_activate_core
 :: Set script path variables needed by Ohook functions
@@ -403,6 +323,15 @@ call :dk_product
 call :dk_showosinfo
 call :oh_setspp
 call :oh_getpath
+:: Defense-in-depth fail-fast: if no supported Office was detected, abort
+:: before any per-product activation routine and before the unconditional
+:: :oh_clearblock / :oh_uninstkey / :oh_licrefresh cleanup calls below.
+:: This also protects the [1] post-install :activate path from running the
+:: mutating cleanup against an environment with no real Office present.
+if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
+    echo No supported Microsoft Office was found to activate.
+    exit /b 1
+)
 set error=
 echo:
 echo Activating Office...

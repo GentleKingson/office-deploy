@@ -405,16 +405,19 @@ jobs:
           exit /b 0
 
       # ----------------------------------------------------------------------
-      # T12: option [2] "Activate installed Office" read-only control flow.
-      # The only test that executes option [2]. It drives
-      # :detect_office_installation and :get_office_license_status against
-      # mocked registry fixtures (64-bit Click-to-Run view, then the 32-bit
-      # Wow6432Node MSI view), then stops at the OFFICE_DEPLOY_TEST_DETECT_ONLY
-      # test seam BEFORE :oh_activate_core -- so no Ohook and no licensing
-      # mutation can happen in CI. Also guards the Wow6432Node spelling so the
-      # 32-bit-detection regression cannot silently return.
+      # T12: option [2] "Activate installed Office" detection control flow.
+      # The only test that executes option [2]. It drives the real MAS-derived
+      # :oh_getpath detector (registry key AND Office marker file, 32/64-bit
+      # aware) against mocked fixtures, then stops at the
+      # OFFICE_DEPLOY_TEST_DETECT_ONLY test seam BEFORE :oh_activate_core, so
+      # no Ohook activation or licensing mutation ever runs in CI.
+      #   A: 64-bit Click-to-Run  (registry + Licenses16/ProPlus*.xrm-ms)  PASS
+      #   B: 32-bit MSI           (Wow6432Node + *Picker.dll)              PASS
+      #   C: registry present but NO marker file  -> must be REJECTED (70)
+      # Also guards the Wow6432Node spelling so the 32-bit regression cannot
+      # silently return.
       # ----------------------------------------------------------------------
-      - name: T12 option [2] detection (read-only, mocked registry)
+      - name: T12 option [2] detection (read-only, mocked registry + marker files)
         shell: cmd
         run: |
           setlocal EnableDelayedExpansion
@@ -426,41 +429,61 @@ jobs:
           set "TMP=%ROOT%\activate-detect\temp"
           set "OFFICE_DEPLOY_TEST_DETECT_ONLY=1"
 
-          :: ---- Scenario A: 64-bit Click-to-Run fixture ----
-          reg delete "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f >nul 2>nul
-          reg delete "HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration" /f >nul 2>nul
-          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v InstallationPath /t REG_SZ /d "C:\OfficeFixture\root" >nul || ( echo [T12a] FAIL: reg add InstallationPath & exit /b 1 )
-          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v VersionToReport /t REG_SZ /d "16.0.18025.10102" >nul || ( echo [T12a] FAIL: reg add VersionToReport & exit /b 1 )
-          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v Platform /t REG_SZ /d "x64" >nul || ( echo [T12a] FAIL: reg add Platform & exit /b 1 )
-          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v ProductReleaseIds /t REG_SZ /d "O365ProPlusRetail,zh-cn" >nul || ( echo [T12a] FAIL: reg add ProductReleaseIds & exit /b 1 )
+          :: Helper: wipe every Office detection key + fixture dir between
+          :: scenarios so a leftover cannot satisfy a later scenario.
+          :: :oh_getpath reads these keys (C2R InstallPath / MSI InstallRoot
+          :: Path) and then requires a marker FILE under the install path.
+          set "CLEAN_KEYS=HKLM\SOFTWARE\Microsoft\Office\ClickToRun HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\15.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\15.0\Common\InstallRoot HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\14.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\14.0\Common\InstallRoot"
+          rmdir /s /q "C:\Fix16" >nul 2>nul
+          rmdir /s /q "C:\Fix16x86" >nul 2>nul
+          rmdir /s /q "C:\NoMarker" >nul 2>nul
+
+          :: ---- Scenario A: 64-bit Click-to-Run + marker file ----
+          for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
+          :: :oh_getpath reads ClickToRun\InstallPath, then checks
+          :: <InstallPath>\root\Licenses16\ProPlus*.xrm-ms.
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f /v InstallPath /t REG_SZ /d "C:\Fix16" >nul || ( echo [T12a] FAIL: reg add InstallPath & exit /b 1 )
+          mkdir "C:\Fix16\root\Licenses16" >nul 2>nul
+          echo dummy-license > "C:\Fix16\root\Licenses16\ProPlusDummy.xrm-ms"
 
           echo 2| call "%ROOT%\activate-detect\officeDeploy.bat" > "%ROOT%\activate-detect\a.out" 2>&1
           set "RC=!ERRORLEVEL!"
           if not "!RC!"=="0" ( echo [T12a] FAIL: expected exit 0, got !RC! & type "%ROOT%\activate-detect\a.out" & exit /b 1 )
-          findstr /c:"Type        : ClickToRun" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: ClickToRun type missing & type "%ROOT%\activate-detect\a.out" & exit /b 1 )
-          findstr /c:"Version     : 16.0.18025.10102" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: version missing & exit /b 1 )
-          findstr /c:"Architecture: x64" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: platform missing & exit /b 1 )
-          findstr /c:"Products    : O365ProPlusRetail,zh-cn" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: product ids missing & exit /b 1 )
-          findstr /c:"Office licenses: 0/0 activated" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: license counts missing & exit /b 1 )
-          findstr /c:"License status: UNLICENSED" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: expected UNLICENSED & exit /b 1 )
+          findstr /c:"Microsoft Office detected" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: not detected & type "%ROOT%\activate-detect\a.out" & exit /b 1 )
           findstr /c:"TEST_DETECT_ONLY=1" "%ROOT%\activate-detect\a.out" >nul || ( echo [T12a] FAIL: test seam not reached & exit /b 1 )
           findstr /c:"Activating your Office" "%ROOT%\activate-detect\a.out" >nul && ( echo [T12a] FAIL: reached Ohook activation & exit /b 1 )
-          echo [T12a] PASS clicktorun-x64 detect=ok license=UNLICENSED no-ohook
+          findstr /c:"No supported Microsoft Office" "%ROOT%\activate-detect\a.out" >nul && ( echo [T12a] FAIL: falsely rejected & exit /b 1 )
+          echo [T12a] PASS clicktorun-x64 registry+marker detected no-ohook
 
-          :: ---- Scenario B: 32-bit MSI fixture (Wow6432Node view) ----
-          reg delete "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f >nul 2>nul
-          reg add "HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot" /f /v Path /t REG_SZ /d "C:\Office16-x86" >nul || ( echo [T12b] FAIL: reg add MSI root & exit /b 1 )
+          :: ---- Scenario B: 32-bit MSI (Wow6432Node) + marker file ----
+          for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
+          :: :oh_getpath reads 16.0\Common\InstallRoot\Path, then checks
+          :: <Path>\*Picker.dll.
+          reg add "HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot" /f /v Path /t REG_SZ /d "C:\Fix16x86" >nul || ( echo [T12b] FAIL: reg add MSI root & exit /b 1 )
+          mkdir "C:\Fix16x86" >nul 2>nul
+          echo dummy-picker > "C:\Fix16x86\DummyPicker.dll"
 
           echo 2| call "%ROOT%\activate-detect\officeDeploy.bat" > "%ROOT%\activate-detect\b.out" 2>&1
           set "RC=!ERRORLEVEL!"
           if not "!RC!"=="0" ( echo [T12b] FAIL: expected exit 0, got !RC! & type "%ROOT%\activate-detect\b.out" & exit /b 1 )
-          findstr /c:"Type        : MSI" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: MSI type missing & type "%ROOT%\activate-detect\b.out" & exit /b 1 )
-          findstr /c:"Version     : 16.0" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: MSI version missing & exit /b 1 )
-          findstr /c:"Office licenses: 0/0 activated" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: license counts missing & exit /b 1 )
-          findstr /c:"License status: UNLICENSED" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: expected UNLICENSED & exit /b 1 )
+          findstr /c:"Microsoft Office detected" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: not detected & type "%ROOT%\activate-detect\b.out" & exit /b 1 )
           findstr /c:"TEST_DETECT_ONLY=1" "%ROOT%\activate-detect\b.out" >nul || ( echo [T12b] FAIL: test seam not reached & exit /b 1 )
           findstr /c:"Activating your Office" "%ROOT%\activate-detect\b.out" >nul && ( echo [T12b] FAIL: reached Ohook activation & exit /b 1 )
-          echo [T12b] PASS msi-x86-wow6432node detect=ok license=UNLICENSED no-ohook
+          findstr /c:"No supported Microsoft Office" "%ROOT%\activate-detect\b.out" >nul && ( echo [T12b] FAIL: falsely rejected & exit /b 1 )
+          echo [T12b] PASS msi-x86-wow6432node registry+marker detected no-ohook
+
+          :: ---- Scenario C: registry present, marker file ABSENT -> REJECT ----
+          for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f /v InstallPath /t REG_SZ /d "C:\NoMarker" >nul || ( echo [T12c] FAIL: reg add InstallPath & exit /b 1 )
+          :: Deliberately do NOT create C:\NoMarker\root\Licenses16\ProPlus*.xrm-ms.
+
+          echo 2| call "%ROOT%\activate-detect\officeDeploy.bat" > "%ROOT%\activate-detect\c.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="70" ( echo [T12c] FAIL: expected exit 70, got !RC! & type "%ROOT%\activate-detect\c.out" & exit /b 1 )
+          findstr /c:"No supported Microsoft Office installation was found." "%ROOT%\activate-detect\c.out" >nul || ( echo [T12c] FAIL: reject message missing & type "%ROOT%\activate-detect\c.out" & exit /b 1 )
+          findstr /c:"TEST_DETECT_ONLY=1" "%ROOT%\activate-detect\c.out" >nul && ( echo [T12c] FAIL: seam reached on reject & exit /b 1 )
+          findstr /c:"Activating your Office" "%ROOT%\activate-detect\c.out" >nul && ( echo [T12c] FAIL: reached Ohook activation & exit /b 1 )
+          echo [T12c] PASS registry-without-marker rejected exit=70 no-ohook
 
           :: ---- Static guards: Wow6432Node spelling must not regress ----
           findstr /c:"WOW64Node\Microsoft" "%ROOT%\activate-detect\officeDeploy.bat" >nul && ( echo [T12] FAIL: WOW64Node typo present & exit /b 1 )
