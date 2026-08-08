@@ -362,6 +362,8 @@ exit /b %_detectCmdExit%
 ::    all licensed               -> LICENSED
 ::    some licensed              -> PARTIALLY_LICENSED
 ::    none licensed              -> UNLICENSED
+::    no Office license objects  -> UNLICENSED (nothing to activate)
+::    licensing query failed     -> UNABLE_TO_DETERMINE
 ::  Uses only Microsoft's own Software Licensing components in read-only
 ::  mode. It writes no registry, installs no product key, clears no
 ::  license, modifies no token, and modifies no Office file.
@@ -371,7 +373,7 @@ set "_aoLicensedCount=0"
 set "_aoOfficeCount=0"
 set "_aoGraceEnd="
 set "_aoLicOut=%TEMP%\office-deploy-license-!RANDOM!.txt"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$appId='0ff1ce15-a989-479d-af46-f275c6370663'; $state='UNABLE_TO_DETERMINE'; $grace=''; $licensed=0; $count=0; try { $prods = Get-WmiObject SoftwareLicensingProduct -ErrorAction Stop | Where-Object { $_.ApplicationID -eq $appId -and $null -ne $_.PartialProductKey }; foreach($p in $prods){ $count=$count+1; if($p.LicenseStatus -eq 1){ $licensed=$licensed+1 } else { try { $g=$p.GracePeriodRemaining; if($g -gt 0){ $days=[math]::Floor($g/1440); $grace='~'+$days+' day(s) remaining' } } catch {} } } } catch { $state='UNABLE_TO_DETERMINE' }; if($count -gt 0){ if($licensed -eq $count){ $state='LICENSED' } else { if($licensed -gt 0){ $state='PARTIALLY_LICENSED' } else { $state='UNLICENSED' } } } else { try { if(Test-Path 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\Tokens\Sku'){ $state='UNLICENSED' } } catch {} }; 'AO_LICENSE_STATE='+$state; 'AO_LICENSED_COUNT='+$licensed; 'AO_OFFICE_COUNT='+$count; 'AO_GRACE_END='+$grace; exit 0" > "%_aoLicOut%" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$appId='0ff1ce15-a989-479d-af46-f275c6370663'; $state='UNABLE_TO_DETERMINE'; $grace=''; $licensed=0; $count=0; $ok=$false; try { $prods = Get-WmiObject SoftwareLicensingProduct -ErrorAction Stop | Where-Object { $_.ApplicationID -eq $appId -and $null -ne $_.PartialProductKey }; $ok=$true; foreach($p in $prods){ $count=$count+1; if($p.LicenseStatus -eq 1){ $licensed=$licensed+1 } else { try { $g=$p.GracePeriodRemaining; if($g -gt 0){ $days=[math]::Floor($g/1440); $grace='~'+$days+' day(s) remaining' } } catch {} } } } catch { $state='UNABLE_TO_DETERMINE' }; if($ok){ if($count -gt 0){ if($licensed -eq $count){ $state='LICENSED' } else { if($licensed -gt 0){ $state='PARTIALLY_LICENSED' } else { $state='UNLICENSED' } } } else { $state='UNLICENSED' } }; 'AO_LICENSE_STATE='+$state; 'AO_LICENSED_COUNT='+$licensed; 'AO_OFFICE_COUNT='+$count; 'AO_GRACE_END='+$grace; exit 0" > "%_aoLicOut%" 2>nul
 if exist "%_aoLicOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_aoLicOut%") do (
     if /i "%%A"=="AO_LICENSE_STATE" set "_aoLicenseState=%%B"
     if /i "%%A"=="AO_LICENSED_COUNT" set "_aoLicensedCount=%%B"
