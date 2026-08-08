@@ -4,6 +4,70 @@ setlocal EnableDelayedExpansion
 title Microsoft Office Installation
 ::Installing Microsoft 365 Apps for enterprise. Writing by Kingson.
 
+set "_mode=interactive"
+set "_configOnly=0"
+set "_exitCode=0"
+set "_result=SUCCESS"
+set "_stage=INIT"
+set "_nativeRelaunch=0"
+set "_re1=0"
+set "_re2=0"
+set "_setup=%~dp0setup.exe"
+set "_cfg=%~dp0Configuration.xml"
+set "_logDir=%TEMP%\office-deploy"
+set "_log=%_logDir%\office-deploy.log"
+:: Stable CLI exit codes: 2 arguments, 10 admin, 20 environment, 30/31 ODT,
+:: 40 configuration, 50 install, 60 verification, 70 internal.
+
+:parse_args
+if "%~1"=="" goto args_parsed
+if /i "%~1"=="--unattended" (set "_mode=unattended"&shift&goto parse_args)
+if /i "%~1"=="/unattended" (set "_mode=unattended"&shift&goto parse_args)
+if /i "%~1"=="--config-only" (set "_configOnly=1"&shift&goto parse_args)
+if /i "%~1"=="/config-only" (set "_configOnly=1"&shift&goto parse_args)
+if /i "%~1"=="--help" (call :show_help&endlocal&exit /b 0)
+if /i "%~1"=="/help" (call :show_help&endlocal&exit /b 0)
+if /i "%~1"=="re1" (set "_re1=1"&set "_nativeRelaunch=1"&shift&goto parse_args)
+if /i "%~1"=="re2" (set "_re2=1"&set "_nativeRelaunch=1"&shift&goto parse_args)
+echo [office-deploy] ERROR=Unknown argument.
+call :show_help
+endlocal&exit /b 2
+
+:args_parsed
+if "%_configOnly%"=="1" if /i not "%_mode%"=="unattended" (
+    echo [office-deploy] ERROR=--config-only requires --unattended.
+    endlocal&exit /b 2
+)
+
+if /i "%_mode%"=="unattended" (
+    set "_logInitExit=0"
+    if not exist "%_logDir%\" (
+        mkdir "%_logDir%" >nul 2>nul
+        set "_logInitExit=!ERRORLEVEL!"
+    )
+    if not exist "%_logDir%\" (
+        echo [office-deploy] RESULT=FAILED
+        echo [office-deploy] EXIT_CODE=70
+        endlocal&exit /b 70
+    )
+    >"%_log%" echo [office-deploy] START_TIME=%DATE% %TIME%
+    set "_logWriteExit=!ERRORLEVEL!"
+    if not "!_logWriteExit!"=="0" (
+        echo [office-deploy] RESULT=FAILED
+        echo [office-deploy] EXIT_CODE=70
+        endlocal&exit /b 70
+    )
+    call :log "LOG_INIT_EXIT_CODE=!_logInitExit!"
+    call :log "MODE=UNATTENDED"
+    call :log "CONFIG_ONLY=%_configOnly%"
+    call :log "SCRIPT_PATH=%~f0"
+    for /f "delims=" %%V in ('ver') do call :log "WINDOWS_VERSION=%%V"
+    call :log "PROCESSOR_ARCHITECTURE=%PROCESSOR_ARCHITECTURE%"
+    call :log "NATIVE_RELAUNCH=%_nativeRelaunch%"
+    call :log "ODT_PATH=%_setup%"
+    call :log "CONFIG_PATH=%_cfg%"
+)
+
 ::  Set correct system path for 64-bit registry access
 if exist "%SystemRoot%\Sysnative\reg.exe" (
 set "SysPath=%SystemRoot%\Sysnative"
@@ -14,17 +78,20 @@ set "Path=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemR
 )
 
 ::  Re-launch under native arch if running in WOW64
-set "_cmdf=%~f0"
-for %%# in (%*) do (set "params=!params! "%%~#"")
-if exist %SystemRoot%\Sysnative\cmd.exe if not defined re1 (
-setlocal DisableDelayedExpansion
-start %SystemRoot%\Sysnative\cmd.exe /c ""!_cmdf!" %params% re1"
-exit /b
+set "_childArgs="
+if /i "%_mode%"=="unattended" set "_childArgs=--unattended"
+if "%_configOnly%"=="1" set "_childArgs=!_childArgs! --config-only"
+if "%_re1%"=="1" set "_childArgs=!_childArgs! re1"
+if "%_re2%"=="1" set "_childArgs=!_childArgs! re2"
+if "%_configOnly%"=="0" if exist "%SystemRoot%\Sysnative\cmd.exe" if "%_re1%"=="0" (
+    "%SystemRoot%\Sysnative\cmd.exe" /d /s /c ""%~f0" !_childArgs! re1"
+    set "_nativeExit=!ERRORLEVEL!"
+    endlocal&exit /b !_nativeExit!
 )
-if exist %SystemRoot%\SysArm32\cmd.exe if %PROCESSOR_ARCHITECTURE%==AMD64 if not defined re2 (
-setlocal DisableDelayedExpansion
-start %SystemRoot%\SysArm32\cmd.exe /c ""!_cmdf!" %params% re2"
-exit /b
+if "%_configOnly%"=="0" if exist "%SystemRoot%\SysArm32\cmd.exe" if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" if "%_re2%"=="0" (
+    "%SystemRoot%\SysArm32\cmd.exe" /d /s /c ""%~f0" !_childArgs! re2"
+    set "_nativeExit=!ERRORLEVEL!"
+    endlocal&exit /b !_nativeExit!
 )
 
 cls
@@ -36,11 +103,22 @@ echo - Microsoft 365 Apps for enterprise
 echo.
 
 :: Check administrator privilege
+if "%_configOnly%"=="1" (
+    call :log "ADMIN_CHECK=SKIPPED"
+    goto check
+)
 net session >nul 2>nul
-if %ERRORLEVEL% neq 0 (
+set "_adminExit=!ERRORLEVEL!"
+if /i "%_mode%"=="unattended" (
+    if "!_adminExit!"=="0" (call :log "ADMIN_CHECK=SUCCESS") else call :log "ADMIN_CHECK=FAILED"
+    call :log "ADMIN_CHECK_EXIT_CODE=!_adminExit!"
+)
+if not "!_adminExit!"=="0" (
     echo This script must be run as Administrator.
     echo Right-click the script and select "Run as administrator".
-    goto end
+    set "_exitCode=10"
+    set "_result=FAILED"
+    goto finish
 )
 
 :check
@@ -52,12 +130,15 @@ for %%f in (%files%) do (
         set /a missing+=1
     )
 )
-if %missing% == 0 (
+if !missing! EQU 0 (
     echo Checking successfully...
+    if /i "%_mode%"=="unattended" goto install1
     goto install
 ) else (
-    echo Missing %missing% file(s)
-    goto fail
+    echo Missing !missing! file(s)
+    set "_exitCode=20"
+    set "_result=FAILED"
+    goto finish
 )
 
 :install
@@ -67,77 +148,123 @@ echo [1] Microsoft 365 Apps for enterprise
 echo [2] Exit
 echo ----------------------------------------------------
 choice /c 12 /n /m "Please enter number: "
-if %ERRORLEVEL%==1 goto install1
-if %ERRORLEVEL%==2 goto end
+set "_choiceExit=!ERRORLEVEL!"
+if "!_choiceExit!"=="1" goto install1
+if "!_choiceExit!"=="2" goto finish
+set "_exitCode=70"
+set "_result=FAILED"
+goto finish
 
 :install1
 echo ----------------------------------------------------
-echo Installing Microsoft 365 Apps for enterprise...
-if not exist "setup.exe" (
+if "%_configOnly%"=="1" (echo Generating unattended Office configuration...) else echo Installing Microsoft 365 Apps for enterprise...
+set "_displayLevel=Full"
+if /i "%_mode%"=="unattended" set "_displayLevel=None"
+set "_stage=CONFIG"
+if /i "%_mode%"=="unattended" call :log "STAGE=!_stage!"
+call :write_config
+set "_configExit=!ERRORLEVEL!"
+if not "!_configExit!"=="0" (
+    echo Failed to generate or validate configuration file.
+    set "_exitCode=40"
+    set "_result=FAILED"
+    goto finish
+)
+if "%_configOnly%"=="1" goto finish
+
+set "_stage=DOWNLOAD"
+if /i "%_mode%"=="unattended" call :log "STAGE=!_stage!"
+set "_downloadExit=0"
+if not exist "%_setup%" (
     echo setup.exe not found. Downloading from Microsoft CDN...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://officecdn.microsoft.com/pr/wsus/setup.exe' -OutFile '%~dp0setup.exe'"
-    if not exist "setup.exe" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://officecdn.microsoft.com/pr/wsus/setup.exe' -OutFile ([Environment]::GetEnvironmentVariable('_setup')); exit 0 } catch { Write-Error $_; exit 1 }"
+    set "_downloadExit=!ERRORLEVEL!"
+    if /i "%_mode%"=="unattended" call :log "DOWNLOAD_EXIT_CODE=!_downloadExit!"
+    if not "!_downloadExit!"=="0" (
         echo Failed to download setup.exe
-        goto fail
+        set "_exitCode=30"
+        set "_result=FAILED"
+        goto finish
     )
     echo setup.exe downloaded successfully.
+ ) else if /i "%_mode%"=="unattended" call :log "DOWNLOAD_EXIT_CODE=0"
+if not exist "%_setup%" (
+    set "_exitCode=31"
+    set "_result=FAILED"
+    goto finish
 )
-echo Generating configuration file...
-set "_cfg=%~dp0Configuration.xml"
-(
-echo ^<Configuration ID="2cd8f1d8-6b10-4233-96fd-3616bfa137cb"^>
-echo   ^<Add OfficeClientEdition="64" Channel="MonthlyEnterprise"^>
-echo     ^<Product ID="O365ProPlusRetail"^>
-echo       ^<Language ID="zh-cn" /^>
-echo       ^<ExcludeApp ID="Groove" /^>
-echo       ^<ExcludeApp ID="Lync" /^>
-echo       ^<ExcludeApp ID="OneDrive" /^>
-echo       ^<ExcludeApp ID="OutlookForWindows" /^>
-echo       ^<ExcludeApp ID="Teams" /^>
-echo     ^</Product^>
-echo   ^</Add^>
-echo   ^<Updates Enabled="FALSE" /^>
-echo   ^<RemoveMSI /^>
-echo   ^<AppSettings^>
-echo     ^<User Key="software\microsoft\office\16.0\excel\options" Name="defaultformat" Value="51" Type="REG_DWORD" App="excel16" Id="L_SaveExcelfilesas" /^>
-echo     ^<User Key="software\microsoft\office\16.0\powerpoint\options" Name="defaultformat" Value="27" Type="REG_DWORD" App="ppt16" Id="L_SavePowerPointfilesas" /^>
-echo     ^<User Key="software\microsoft\office\16.0\word\options" Name="defaultformat" Value="" Type="REG_SZ" App="word16" Id="L_SaveWordfilesas" /^>
-echo   ^</AppSettings^>
-echo   ^<Display Level="Full" AcceptEULA="TRUE" /^>
-echo ^</Configuration^>
-) > "%_cfg%"
-if not exist "%_cfg%" (
-    echo Failed to generate configuration file
-    goto fail
+for %%A in ("%_setup%") do set "_setupSize=%%~zA"
+if not defined _setupSize set "_setupSize=0"
+if !_setupSize! LEQ 0 (
+    echo setup.exe is empty.
+    set "_exitCode=31"
+    set "_result=FAILED"
+    goto finish
 )
-setup.exe /configure "%_cfg%"
-if %ERRORLEVEL% == 0 (
-    echo Installation completed successfully.
-    goto activate
-) else (
-    echo Installation failed with error code %ERRORLEVEL%
-    goto fail
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=Get-AuthenticodeSignature -LiteralPath ([Environment]::GetEnvironmentVariable('_setup')); if ($s.Status -eq 'Valid') { exit 0 } else { Write-Error ('Invalid Authenticode status: ' + $s.Status); exit 1 }"
+set "_signatureExit=!ERRORLEVEL!"
+if not "!_signatureExit!"=="0" (
+    echo setup.exe signature validation failed.
+    set "_exitCode=31"
+    set "_result=FAILED"
+    goto finish
 )
+
+set "_stage=INSTALL"
+if /i "%_mode%"=="unattended" call :log "STAGE=!_stage!"
+"%_setup%" /configure "%_cfg%"
+set "_odtExit=!ERRORLEVEL!"
+if /i "%_mode%"=="unattended" call :log "ODT_EXIT_CODE=!_odtExit!"
+if not "!_odtExit!"=="0" (
+    echo Installation failed with error code !_odtExit!
+    set "_exitCode=50"
+    set "_result=FAILED"
+    goto finish
+)
+echo Installation completed successfully.
+
+set "_stage=VERIFY"
+if /i "%_mode%"=="unattended" call :log "STAGE=!_stage!"
+call :verify_office_install
+set "_verifyExit=!ERRORLEVEL!"
+if not "!_verifyExit!"=="0" (
+    echo Office installation verification failed.
+    if /i "%_mode%"=="unattended" call :log "VERIFY_RESULT=FAILED"
+    set "_exitCode=60"
+    set "_result=FAILED"
+    goto finish
+)
+if /i "%_mode%"=="unattended" (
+    call :log "VERIFY_RESULT=SUCCESS"
+    goto finish
+)
+goto activate
 
 :activate
 echo ----------------------------------------------------
 echo Activating your Office, please wait...
 call :oh_activate_core
-if %ERRORLEVEL% == 0 (
+set "_activationExit=!ERRORLEVEL!"
+if "!_activationExit!"=="0" (
     echo Activation Successfully!
     echo ----------------------------------------------------
-    goto end
+    goto finish
 ) else (
-    echo Activation failed with error code %ERRORLEVEL%
+    echo Activation failed with error code !_activationExit!
     goto activateFail
 )
 
 :fail
 echo Microsoft 365 Apps for enterprise install failure
-goto end
+set "_exitCode=70"
+set "_result=FAILED"
+goto finish
 
 :activateFail
 echo Microsoft 365 Apps for enterprise activate failure
+set "_exitCode=70"
+set "_result=FAILED"
+goto finish
 
 :oh_activate_core
 :: Set script path variables needed by Ohook functions
@@ -269,9 +396,82 @@ call :oh_process
 if defined isOspp (call :oh_hookinstall_ospp) else (call :oh_hookinstall)
 exit /b
 
-:end
-echo Press any key to exit... & pause > nul
-exit
+:write_config
+echo Generating configuration file...
+(
+echo ^<Configuration ID="2cd8f1d8-6b10-4233-96fd-3616bfa137cb"^>
+echo   ^<Add OfficeClientEdition="64" Channel="MonthlyEnterprise"^>
+echo     ^<Product ID="O365ProPlusRetail"^>
+echo       ^<Language ID="zh-cn" /^>
+echo       ^<ExcludeApp ID="Groove" /^>
+echo       ^<ExcludeApp ID="Lync" /^>
+echo       ^<ExcludeApp ID="OneDrive" /^>
+echo       ^<ExcludeApp ID="OutlookForWindows" /^>
+echo       ^<ExcludeApp ID="Teams" /^>
+echo     ^</Product^>
+echo   ^</Add^>
+echo   ^<Updates Enabled="FALSE" /^>
+echo   ^<RemoveMSI /^>
+echo   ^<AppSettings^>
+echo     ^<User Key="software\microsoft\office\16.0\excel\options" Name="defaultformat" Value="51" Type="REG_DWORD" App="excel16" Id="L_SaveExcelfilesas" /^>
+echo     ^<User Key="software\microsoft\office\16.0\powerpoint\options" Name="defaultformat" Value="27" Type="REG_DWORD" App="ppt16" Id="L_SavePowerPointfilesas" /^>
+echo     ^<User Key="software\microsoft\office\16.0\word\options" Name="defaultformat" Value="" Type="REG_SZ" App="word16" Id="L_SaveWordfilesas" /^>
+echo   ^</AppSettings^>
+echo   ^<Display Level="%_displayLevel%" AcceptEULA="TRUE" /^>
+echo ^</Configuration^>
+) > "%_cfg%"
+set "_configWriteExit=!ERRORLEVEL!"
+if not "!_configWriteExit!"=="0" exit /b 1
+if not exist "%_cfg%" exit /b 1
+for %%A in ("%_cfg%") do set "_cfgSize=%%~zA"
+if not defined _cfgSize exit /b 1
+if !_cfgSize! LEQ 0 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $null=[xml](Get-Content -LiteralPath ([Environment]::GetEnvironmentVariable('_cfg')) -Raw); exit 0 } catch { Write-Error $_; exit 1 }"
+set "_xmlExit=!ERRORLEVEL!"
+if not "!_xmlExit!"=="0" exit /b 1
+exit /b 0
+
+:verify_office_install
+set "_verifyOut=%TEMP%\office-deploy-verification-!RANDOM!.txt"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$keys=@('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Office\ClickToRun\Configuration','Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Office\ClickToRun\Configuration'); $c=$null; foreach($k in $keys){try{$c=Get-ItemProperty -LiteralPath $k -ErrorAction Stop; break}catch{}}; if($null -eq $c){exit 1}; $p=[string]$c.InstallationPath; $ids=[string]$c.ProductReleaseIds; $v=[string]$c.VersionToReport; $a=[string]$c.Platform; 'INSTALLATION_PATH='+$p; 'PRODUCT_RELEASE_IDS='+$ids; 'VERSION_TO_REPORT='+$v; 'PLATFORM='+$a; if([string]::IsNullOrWhiteSpace($p) -or [string]::IsNullOrWhiteSpace($v) -or $ids -notmatch '(^|[,;\s])O365ProPlusRetail([,;\s]|$)' -or $a -ne 'x64'){exit 1}; $root=Join-Path $p 'root\Office16'; if(Test-Path (Join-Path $p 'WINWORD.EXE')){$root=$p}; foreach($exe in @('WINWORD.EXE','EXCEL.EXE','POWERPNT.EXE')){if(-not (Test-Path -LiteralPath (Join-Path $root $exe) -PathType Leaf)){exit 1}}; exit 0" > "%_verifyOut%"
+set "_verifyCommandExit=!ERRORLEVEL!"
+if exist "%_verifyOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_verifyOut%") do (
+    if /i "%%A"=="INSTALLATION_PATH" set "_installationPath=%%B"
+    if /i "%%A"=="PRODUCT_RELEASE_IDS" set "_productReleaseIds=%%B"
+    if /i "%%A"=="VERSION_TO_REPORT" set "_versionToReport=%%B"
+    if /i "%%A"=="PLATFORM" set "_platform=%%B"
+)
+if /i "%_mode%"=="unattended" (
+    call :log "INSTALLATION_PATH=!_installationPath!"
+    call :log "PRODUCT_RELEASE_IDS=!_productReleaseIds!"
+    call :log "VERSION_TO_REPORT=!_versionToReport!"
+    call :log "PLATFORM=!_platform!"
+)
+del /q "%_verifyOut%" >nul 2>nul
+exit /b %_verifyCommandExit%
+
+:log
+set "_logLine=%~1"
+echo([office-deploy] !_logLine!
+>>"%_log%" echo([office-deploy] !_logLine!
+exit /b 0
+
+:show_help
+echo Usage:
+echo   officeDeploy.bat
+echo   officeDeploy.bat --unattended
+echo   officeDeploy.bat --unattended --config-only
+echo   officeDeploy.bat --help
+exit /b 0
+
+:finish
+if /i "%_mode%"=="unattended" (
+    call :log "RESULT=%_result%"
+    call :log "EXIT_CODE=%_exitCode%"
+    call :log "END_TIME=%DATE% %TIME%"
+)
+if /i "%_mode%"=="interactive" (echo Press any key to exit...&pause >nul)
+endlocal&exit /b %_exitCode%
 
 :oh_reset
 
