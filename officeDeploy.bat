@@ -1,8 +1,8 @@
 @set masver=3.10
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-title Microsoft Office Installation
-::Installing Microsoft 365 Apps for enterprise. Writing by Kingson.
+title Microsoft Office Deployment Utility
+::Microsoft Office deployment utility. Writing by Kingson.
 
 set "_mode=interactive"
 set "_configOnly=0"
@@ -109,10 +109,11 @@ if "%_configOnly%"=="0" if exist "%SystemRoot%\SysArm32\cmd.exe" if /i "%PROCESS
 
 cls
 echo ============================================================================
-echo Install Microsoft 365 Apps for enterprise
+echo Microsoft Office Deployment Utility
 echo ============================================================================&echo.
-echo #Supported products:
-echo - Microsoft 365 Apps for enterprise
+echo #Supported actions:
+echo - Install Microsoft 365 Apps for enterprise
+echo - Activate an installed Microsoft Office / Microsoft 365
 echo.
 
 :: Check administrator privilege
@@ -155,15 +156,17 @@ if !missing! EQU 0 (
 )
 
 :install
-echo Select one of the Office versions.
+echo Select an action.
 echo ----------------------------------------------------
-echo [1] Microsoft 365 Apps for enterprise
-echo [2] Exit
+echo [1] Install Microsoft 365 Apps for enterprise
+echo [2] Activate installed Office
+echo [3] Exit
 echo ----------------------------------------------------
-choice /c 12 /n /m "Please enter number: "
+choice /c 123 /n /m "Please enter number: "
 set "_choiceExit=!ERRORLEVEL!"
 if "!_choiceExit!"=="1" goto install1
-if "!_choiceExit!"=="2" goto finish
+if "!_choiceExit!"=="2" goto activate_existing
+if "!_choiceExit!"=="3" goto finish
 set "_exitCode=70"
 set "_result=FAILED"
 goto finish
@@ -251,6 +254,49 @@ set "_exitCode=70"
 set "_result=FAILED"
 goto finish
 
+::========================================================================
+::  Activate installed Office entry point.
+::  Interactive control layer for option [2] of the menu.
+::  Detects Office that is ALREADY installed on this machine by reusing the
+::  SAME supported-Office detector the activation engine uses
+::  (:oh_check_supported_office -> :oh_getpath registry+marker file, plus the
+::  upstream ClickToRun service validity check), then activates it through
+::  the existing :oh_activate_core Ohook implementation (the same one used by
+::  the post-install :activate path). It never downloads or reinstalls Office,
+::  never touches the ODT / Configuration.xml path, and has no second, weaker
+::  detector or a WMI license classifier of its own. Ohook is idempotent, so
+::  re-running [2] is safe; it reinstalls cleanly.
+:activate_existing
+set "_stage=ACTIVATE_EXISTING"
+echo ----------------------------------------------------
+echo Checking for an installed Microsoft Office...
+:: Read-only preflight. Reuses the SAME supported-Office detector the
+:: activation engine uses (:oh_check_supported_office -> :oh_getpath plus
+:: the upstream ClickToRun service validity check), so [2] and the Ohook
+:: core can never disagree on what counts as a supported install. The
+:: helper defines nul/nul6 itself, so no variable setup is needed here.
+call :oh_check_supported_office
+if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
+    echo No supported Microsoft Office installation was found.
+    set "_exitCode=70"
+    set "_result=FAILED"
+    goto finish
+)
+echo Microsoft Office detected. Proceeding with Ohook activation.
+echo Activating your Office, please wait...
+call :oh_activate_core
+set "_activationExit=!ERRORLEVEL!"
+echo.
+if "!_activationExit!"=="0" (
+    echo Microsoft Office is now permanently activated.
+) else (
+    echo Activation failed with error code !_activationExit!.
+    echo Review the Ohook messages above; running this option again may help.
+    set "_exitCode=70"
+    set "_result=FAILED"
+)
+goto finish
+
 :oh_activate_core
 :: Set script path variables needed by Ohook functions
 set "_batf=%~f0"
@@ -269,8 +315,22 @@ call :dk_ckeckwmic
 call :dk_product
 call :dk_showosinfo
 call :oh_setspp
-call :oh_getpath
+:: Reset `error` BEFORE the shared detector, then let the detector set
+:: error=1 if it finds a broken C2R install (files present but service
+:: gone). This matches MAS upstream ordering: reset, then detect, then
+:: carry any error through to the final result. A leftover error from a
+:: caller (e.g. [2] preflight) is also cleared here.
 set error=
+call :oh_check_supported_office
+:: Defense-in-depth fail-fast: if no supported Office was detected (also
+:: catches a C2R install whose ClickToRun service is gone, via the shared
+:: helper), abort before any per-product activation routine and before the
+:: unconditional :oh_clearblock / :oh_uninstkey / :oh_licrefresh cleanup
+:: calls below. This also protects the [1] post-install :activate path.
+if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
+    echo No supported Microsoft Office was found to activate.
+    exit /b 1
+)
 echo:
 echo Activating Office...
 :: Process Office 16.0 C2R
@@ -569,6 +629,40 @@ set _License=
 exit /b
 
 ::========================================================================================================================================
+
+::  Supported-Office detector shared by :activate_existing (option [2]) and
+::  :oh_activate_core. Calls :oh_getpath (registry + marker file), then adds
+::  the MAS upstream C2R validity check: a ClickToRun install whose service
+::  is gone is treated as a broken install and cleared, so Ohook never runs
+::  against Office files that are no longer serviceable. Mirrors upstream
+::  Ohook_Activation_AIO.cmd (sc query ClickToRunSvc / OfficeSvc; 1060 means
+::  the service does not exist). Sets `error=1` when a C2R candidate is
+::  judged broken (service missing) -- even if another valid Office (e.g.
+::  MSI) remains on the machine. Callers reset `error` BEFORE calling this
+::  helper, matching upstream ordering, so the error survives to the result.
+::  Self-contained: defines %nul% and %nul6% itself, so callers need no
+::  variable setup (:oh_getpath reads %nul6%; the service checks read %nul%).
+:oh_check_supported_office
+set "nul=>nul 2>&1"
+set "nul6=2^>nul"
+call :oh_getpath
+sc query ClickToRunSvc %nul%
+set _ohSvcErr1=%errorlevel%
+sc query OfficeSvc %nul%
+set _ohSvcErr2=%errorlevel%
+if defined o16c2r if "%_ohSvcErr1%"=="1060" (
+    echo Checking ClickToRun Service             [Not found, Office 16.0 files found]
+    set "o16c2r="
+    set "error=1"
+)
+if defined o15c2r if "%_ohSvcErr1%"=="1060" if "%_ohSvcErr2%"=="1060" (
+    echo Checking ClickToRun Service             [Not found, Office 15.0 files found]
+    set "o15c2r="
+    set "error=1"
+)
+set "_ohSvcErr1="
+set "_ohSvcErr2="
+exit /b
 
 :oh_getpath
 

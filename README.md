@@ -38,9 +38,20 @@ Run **Command Prompt or Windows Terminal as Administrator**, then execute:
 officeDeploy.bat
 ```
 
-The interactive mode displays the product menu and performs the normal interactive installation flow.
+The interactive mode displays an action menu:
 
-> Interactive mode retains the repository's existing legacy post-install activation path. Review the source and applicable software licensing requirements before using that path.
+```text
+[1] Install Microsoft 365 Apps for enterprise
+[2] Activate installed Office
+[3] Exit
+```
+
+- `[1] Install` performs the normal interactive Microsoft 365 installation flow.
+- `[2] Activate installed Office` only acts on Office that is already installed. It detects Office through the same MAS-derived detector the activation engine itself uses (`:oh_check_supported_office` → `:oh_getpath`, which requires the registry key **and** the Office marker file, both 32/64-bit aware, **plus** the upstream ClickToRun service validity check), then activates it by reusing the script's existing Ohook activation capability — the same implementation the `[1]` post-install path uses. It does not download or reinstall Office. Ohook is idempotent, so re-running `[2]` is safe; it reinstalls cleanly.
+
+> Both activation paths (`[1]` post-install and `[2]` Activate installed Office) share the repository's existing MAS-derived Ohook activation implementation. GitHub Actions does not execute Office activation.
+>
+> Review the source and applicable software licensing requirements before using either activation path.
 
 ### Unattended installation
 
@@ -89,7 +100,7 @@ officeDeploy.bat --help
 
 | Command | Description |
 |---|---|
-| `officeDeploy.bat` | Interactive deployment |
+| `officeDeploy.bat` | Interactive menu: install Microsoft 365, activate installed Office, or exit |
 | `officeDeploy.bat --unattended` | Full unattended deployment |
 | `officeDeploy.bat --unattended --config-only` | Generate and validate configuration only |
 | `officeDeploy.bat --help` | Display command usage |
@@ -352,7 +363,10 @@ Coverage includes:
 - real 32-bit `SysWOW64\cmd.exe` execution;
 - WOW64 → `Sysnative` relaunch;
 - native child → parent exit-code propagation;
-- native child `SCRIPT_PATH` preservation.
+- native child `SCRIPT_PATH` preservation;
+- interactive menu rendering and Exit mapping (`T11`);
+- option `[2]` Office detection through the same MAS-derived detector the activation engine uses (`:oh_check_supported_office`), against mocked registry **and** Office marker files **and** the ClickToRun service: 64-bit Click-to-Run and 32-bit `Wow6432Node` MSI pass; registry-without-marker is rejected; registry+marker without the ClickToRun service is rejected (`T12`, instruments a test bat copy — no Ohook activation is executed);
+- the `:oh_activate_core` fail-fast guard, which must abort before the mutating cleanup routines when no supported Office is present (`T13`).
 
 See:
 
@@ -372,6 +386,8 @@ The runtime workflow intentionally does **not**:
 - execute the activation path;
 - execute Ohook;
 - test ARM64 / `SysArm32`.
+
+`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. Activation itself stays outside the CI boundary.
 
 These belong to separate validation stages.
 
