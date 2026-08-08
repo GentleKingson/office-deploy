@@ -42,16 +42,16 @@ The interactive mode displays an action menu:
 
 ```text
 [1] Install Microsoft 365 Apps for enterprise
-[2] Activate an existing Office installation
+[2] Activate installed Office
 [3] Exit
 ```
 
 - `[1] Install` performs the normal interactive Microsoft 365 installation flow.
-- `[2] Activate installed Office` only acts on Office that is already installed. It checks the installed Office licensing state and uses only supported Microsoft activation paths. It does not download or reinstall Office.
+- `[2] Activate installed Office` only acts on Office that is already installed. It detects the installed Office, reports its license state, and activates it by reusing the script's existing Ohook activation capability — the same implementation the `[1]` post-install path uses. It does not download or reinstall Office.
 
-> The activation option checks the installed Office licensing state and uses only supported Microsoft activation paths. GitHub Actions does not execute Office activation.
+> Both activation paths (`[1]` post-install and `[2]` Activate installed Office) share the repository's existing MAS-derived Ohook activation implementation. GitHub Actions does not execute Office activation.
 >
-> The `[1] Install` flow retains the repository's existing legacy post-install activation path. Review the source and applicable software licensing requirements before using that path.
+> Review the source and applicable software licensing requirements before using either activation path.
 
 ### Unattended installation
 

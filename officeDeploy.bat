@@ -256,13 +256,12 @@ goto finish
 
 ::========================================================================
 ::  Activate installed Office entry point.
-::  Thin interactive control layer for option [2] of the menu.
-::  Reads and (via supported Microsoft mechanisms) activates Office that is
-::  ALREADY installed on this machine. It must never download Office, never
-::  reinstall Office, and never touch the ODT / Configuration.xml path.
-::  It is intentionally decoupled from the legacy :activate / :oh_activate_core
-::  path and relies only on read-only detection helpers plus Microsoft's own
-::  supported activation components.
+::  Interactive control layer for option [2] of the menu.
+::  Detects Office that is ALREADY installed on this machine, then activates
+::  it by directly reusing the script's existing Ohook activation capability
+::  (:oh_activate_core, the same implementation used by the post-install
+::  :activate path). It must never download Office, never reinstall Office,
+::  and never touch the ODT / Configuration.xml path.
 :activate_existing
 set "_stage=ACTIVATE_EXISTING"
 echo ----------------------------------------------------
@@ -276,8 +275,8 @@ if not "!_detectExit!"=="0" (
     goto finish
 )
 echo Installed Office detected:
-if defined _aoType        echo   Type        : !_aoType!
-if defined _aoVersion     echo   Version     : !_aoVersion!
+echo   Type        : !_aoType!
+echo   Version     : !_aoVersion!
 if defined _aoPlatform    echo   Architecture: !_aoPlatform!
 if defined _aoInstallPath echo   Install path: !_aoInstallPath!
 echo.
@@ -290,57 +289,31 @@ if /i "!_aoLicenseState!"=="LICENSED" (
     echo Microsoft Office is already activated.
     goto finish
 )
-if /i "!_aoLicenseState!"=="SUBSCRIPTION_SIGNIN_REQUIRED" (
-    echo This Office uses a subscription license.
-    echo Open an Office application and sign in with the Microsoft account
-    echo that owns the Microsoft 365 license, or with your Work or School account.
-    goto finish
-)
-:: For volume/perpetual SKUs that are licensed but not yet active, refresh the
-:: Software Protection Platform via the official service. This is the same
-:: mechanism Windows/Office use natively; it installs no product key, writes no
-:: licensing registry, and modifies no Office files.
-if /i "!_aoLicenseState!"=="UNLICENSED" (
-    echo Attempting supported Microsoft activation...
-    sc query sppsvc >nul 2>nul
-    if !ERRORLEVEL! EQU 0 (
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $svc = Get-WmiObject SoftwareLicensingService; if ($null -ne $svc) { $null = $svc.RefreshLicenseStatus(); 'REFRESH=OK' } else { 'REFRESH=NO_SERVICE' } } catch { 'REFRESH=ERROR' }" 2>nul
-    ) else (
-        echo Software Protection Platform service is not available.
-    )
-    echo.
-    call :get_office_license_status
-    set "_licenseExit=!ERRORLEVEL!"
-    echo License status after refresh: !_aoLicenseState!
-    if /i "!_aoLicenseState!"=="LICENSED" (
-        echo Microsoft Office is now activated.
-        goto finish
-    )
-    echo Office could not be activated through the supported path.
-    echo If this is a subscription, open an Office application and sign in with
-    echo the Microsoft account that owns the Microsoft 365 license.
-    echo If this is a perpetual/volume SKU, install its product key through
-    echo Microsoft's official channels and rerun this option.
+:: Reuse the script's existing Ohook activation (the same capability the
+:: post-install path uses). It handles C2R 15/16 and MSI 14/15/16 alike;
+:: the Ohook diagnostics above/below report which product was activated.
+echo Activating your Office, please wait...
+call :oh_activate_core
+set "_activationExit=!ERRORLEVEL!"
+echo.
+if "!_activationExit!"=="0" (
+    echo Microsoft Office is now permanently activated.
+) else (
+    echo Activation failed with error code !_activationExit!.
+    echo Review the Ohook messages above; running this option again may help.
     set "_exitCode=70"
     set "_result=FAILED"
-    goto finish
 )
-echo Unable to determine the Office license state.
-echo Open an Office application; if it prompts for activation, follow the
-echo on-screen Microsoft instructions or sign in with the Microsoft account
-echo that owns the license.
-set "_exitCode=70"
-set "_result=FAILED"
 goto finish
 
 ::========================================================================
 ::  Read-only Office installation detector for :activate_existing.
 ::  Sets: _aoType, _aoVersion, _aoPlatform, _aoInstallPath
 ::  Exit 0 = supported Office found, non-zero = none found.
-::  This is deliberately independent of the legacy :oh_getpath detector and
-::  performs only read-only registry/file inspection. It installs no key,
-::  writes no licensing registry, writes/modifies no DLL, creates no hook,
-::  clears no license cache, and never invokes Ohook.
+::  This helper itself is read-only (registry/file inspection only); it
+::  installs no key, writes no licensing registry, writes/modifies no DLL,
+::  creates no hook, and clears no license cache. Activation itself is
+::  delegated to the script's existing :oh_activate_core implementation.
 :detect_office_installation
 set "_aoType="
 set "_aoVersion="
