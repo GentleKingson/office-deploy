@@ -130,10 +130,22 @@ jobs:
           findstr /c:"EXIT_CODE=0" "%LOG%" >nul || ( echo [T6] FAIL: no EXIT_CODE=0 & exit /b 1 )
 
           :: Regression (Runtime-discovered bug): bare `shift` in :parse_args
-          :: used to corrupt %0/%~f0, making SCRIPT_PATH log as "...\<arg>"
-          :: instead of the script path. SCRIPT_PATH must point at the BAT.
-          findstr /c:"SCRIPT_PATH=%ROOT%\config-only\officeDeploy.bat" "%LOG%" >nul || ( echo [T6] FAIL: SCRIPT_PATH not the script path & exit /b 1 )
-          findstr /c:"--unattended" "%LOG%" >nul && ( echo [T6] FAIL: arg leaked into a path in log & exit /b 1 )
+          :: used to corrupt %0/%~f0, so SCRIPT_PATH logged as the CWD plus
+          :: the last shifted argument (e.g. "...\--unattended") instead of
+          :: the script path. Re-read the SCRIPT_PATH line from the log and
+          :: verify (a) it names officeDeploy.bat and (b) it does not contain
+          :: a backslash followed by "--" (the leaked-arg signature). Uses a
+          :: for /f read plus CMD string substitution to avoid findstr
+          :: path-literal quirks.
+          set "SP_LINE="
+          for /f "usebackq tokens=1,* delims==" %%A in ("%LOG%") do (
+            if "%%A"=="[office-deploy] SCRIPT_PATH" set "SP_LINE=%%B"
+          )
+          if not defined SP_LINE ( echo [T6] FAIL: SCRIPT_PATH line absent & exit /b 1 )
+          set "SP_TEST=!SP_LINE:officeDeploy.bat=!"
+          if "!SP_TEST!"=="!SP_LINE!" ( echo [T6] FAIL: SCRIPT_PATH does not name officeDeploy.bat: !SP_LINE! & exit /b 1 )
+          set "SP_TEST=!SP_LINE:\--=!"
+          if not "!SP_TEST!"=="!SP_LINE!" ( echo [T6] FAIL: leaked arg in SCRIPT_PATH: !SP_LINE! & exit /b 1 )
           echo [T6] PASS log-markers-ok SCRIPT_PATH-ok
 
           exit /b 0
