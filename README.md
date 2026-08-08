@@ -1,208 +1,488 @@
-# Office Deploy Script
+# office-deploy
 
-A Windows batch script that automates the installation and activation of **Microsoft 365 Apps for enterprise**. Built on the [MAS (Microsoft Activation Scripts)](https://github.com/massgravel/Microsoft-Activation-Scripts) v3.10 framework, it combines Office deployment via Microsoft's official CDN with the Ohook activation method.
+A single-file Windows batch deployment utility for **Microsoft 365 Apps for enterprise**, with interactive and unattended execution, deterministic exit codes, Office Deployment Tool validation, and Windows runtime CI.
 
-## Requirements
+> **Project status**
+>
+> Windows runtime behavior is continuously validated on **Windows Server 2022** and **Windows Server 2025**.  
+> Full Microsoft 365 installation E2E testing is intentionally handled separately from the lightweight runtime test suite.
 
-- **Administrator privileges** — the script must be run as Administrator
-- **Windows 7 or later** (tested on Windows 7–11)
-- **Internet connection** — required to download `setup.exe` from Microsoft CDN
-- **64-bit or 32-bit Windows** — auto-detects architecture and re-launches under native arch if needed
+## Overview
+
+`office-deploy` provides a repeatable way to deploy Microsoft 365 Apps for enterprise from a Windows batch script.
+
+The project focuses on:
+
+- interactive and unattended execution;
+- Microsoft Office Deployment Tool-based installation;
+- script-relative configuration and download paths;
+- unattended configuration generation;
+- deterministic exit codes for automation;
+- structured runtime logging;
+- Office Deployment Tool integrity validation;
+- recovery from interrupted or invalid ODT downloads;
+- WOW64 → native Windows command relaunch;
+- Windows runtime validation through GitHub Actions.
+
+The project is intentionally kept as a **single primary Batch file** so it remains easy to copy, inspect, and run without an additional runtime or package manager.
+
+---
 
 ## Quick Start
 
-1. Place `officeDeploy.bat` in any directory
-2. Right-click → **Run as administrator**
-3. Select `[1]` to install Microsoft 365 Apps for enterprise
-4. Wait for installation and activation to complete
+### Interactive mode
 
-## Execution Flow
+Run **Command Prompt or Windows Terminal as Administrator**, then execute:
 
-The script follows a linear, label-driven flow:
-
-```
-[Start] → [Arch Check] → [Admin Check] → [Menu] → [Install] → [Activate] → [Exit]
+```bat
+officeDeploy.bat
 ```
 
-### Phase 1: Environment Setup (lines 1–44)
+The interactive mode displays the product menu and performs the normal interactive installation flow.
 
-| Step | What It Does |
-|---|---|
-| **Sysnative path resolution** | Detects 32-bit vs 64-bit CMD and sets correct system paths for registry access |
-| **WOW64 re-launch** | If running under 32-bit CMD on 64-bit Windows, re-launches via `Sysnative\cmd.exe` to access 64-bit registry. Similarly handles ARM64 via `SysArm32` |
-| **Admin check** | Runs `net session` to verify elevated privileges; exits with instructions if not admin |
+> Interactive mode retains the repository's existing legacy post-install activation path. Review the source and applicable software licensing requirements before using that path.
 
-### Phase 2: Installation (lines 63–120)
+### Unattended installation
 
-| Step | What It Does |
-|---|---|
-| **Version selection menu** | Presents a `choice` prompt — currently option `[1]` for Microsoft 365 Apps for enterprise or `[2]` to exit |
-| **Download setup.exe** | If `setup.exe` doesn't exist in the script directory, downloads it from `https://officecdn.microsoft.com/pr/wsus/setup.exe` via PowerShell `Invoke-WebRequest` |
-| **Generate Configuration.xml** | Writes an Office Deployment Tool XML configuration file with these settings: |
-| | - `OfficeClientEdition="64"` — 64-bit only |
-| | - `Channel="MonthlyEnterprise"` — Monthly Enterprise update channel |
-| | - `Product ID="O365ProPlusRetail"` — Microsoft 365 Apps for enterprise |
-| | - `Language ID="zh-cn"` — Simplified Chinese |
-| | - Excluded apps: Groove (OneDrive sync), Lync (Skype), OneDrive, OutlookForWindows, Teams |
-| | - `Updates Enabled="FALSE"` — disables automatic Office updates |
-| | - `RemoveMSI` — removes existing MSI-based Office installations |
-| | - **AppSettings** — sets default file formats: Excel → `.xlsx` (Value=51), PowerPoint → `.pptx` (Value=27), Word → default |
-| | - `Display Level="Full" AcceptEULA="TRUE"` — shows UI, auto-accepts EULA |
-| **Run installer** | Executes `setup.exe /configure Configuration.xml` |
-| **Error handling** | Checks `%ERRORLEVEL%`; proceeds to activation on success, jumps to `:fail` on failure |
+For automated deployment:
 
-### Phase 3: Activation (lines 122–274)
-
-Activation uses the **Ohook** method — a DLL hook technique that intercepts Office's license validation calls. This is sourced from MAS v3.10.
-
-#### 3.1 Initialization (`:oh_activate_core`, lines 142–187)
-
-Sets up script path variables, calls a series of diagnostic and setup subroutines:
-
-| Subroutine | Purpose |
-|---|---|
-| `dk_setvar` | Initializes PowerShell path, Windows build number, color variables, and service names |
-| `dk_reflection` | Sets up .NET reflection code for P/Invoke calls |
-| `dk_ckeckwmic` | Detects whether `wmic.exe` is available (removed in Windows 11 24H2+) |
-| `dk_product` | Gets Windows edition name via `winbrand.dll` |
-| `dk_showosinfo` | Displays OS info, build number, and architecture |
-| `oh_setspp` | Determines which licensing service to use: `SoftwareLicensingProduct` (Win 8+) or `OfficeSoftwareProtectionProduct` (Win 7 / Office 2010) |
-| `oh_getpath` | Scans registry for installed Office versions (C2R and MSI, versions 14/15/16) |
-
-#### 3.2 Version Detection and Processing
-
-The script processes Office in order of version:
-
-1. **Office 16.0 C2R** (`:oh_activate_o16c2r`, lines 190–232) — Office 2016/2019/2021/365 Click-to-Run
-2. **Office 15.0 C2R** (`:oh_activate_o15c2r`, lines 235–270) — Office 2013 Click-to-Run
-3. **Office MSI** (`:oh_processmsi`, lines 723–777) — Office 2010/2013/2016 MSI installations
-
-For each version, it:
-- Queries registry for install path, architecture, version, and product IDs
-- Determines hook DLL paths (`sppc32.dll` for x86, `sppc64.dll` for x64)
-- Checks for expired preview licenses
-- Fixes `ProductReleaseIds` registry entries if corrupted
-
-#### 3.3 License Installation and Hook Setup (`:oh_process`, lines 678–719)
-
-For each detected product ID:
-
-1. Looks up the matching product key and activation ID from the embedded `:ohookdata` table (lines 2047–2598)
-2. Instains missing license files via `oh_installlic` (uses `integrator.exe` or PowerShell/WMI fallback)
-3. Installs the product key via WMI `InstallProductKey`
-4. Installs the Ohook hook via `oh_hookinstall` or `oh_hookinstall_ospp`
-
-#### 3.4 Ohook Installation (`:oh_hookinstall`, lines 474–527)
-
-The core activation mechanism:
-
-1. Removes any previous hook installation
-2. Creates a **symlink** from `%OfficeRoot%\vfs\System\sppcs.dll` → system `sppc.dll`
-3. Extracts a custom `sppc.dll` (embedded as base64 in the script) to `%OfficeRoot%\vfs\System\sppc.dll`
-4. Modifies the DLL's hash to avoid detection
-5. For older Office (pre-Win8), hooks `OSPPC.DLL` instead via `:oh_hookinstall_ospp`
-
-#### 3.5 Cleanup (`:oh_clearblock`, `:oh_uninstkey`, `:oh_licrefresh`, lines 781–996)
-
-| Cleanup Step | What It Does |
-|---|---|
-| **Clear vNext/license blocks** | Removes Office subscription license registry keys, local license cache files, and SharedComputerLicensing entries for all user accounts |
-| **Clear device-based licensing** | Removes device licensing registry entries |
-| **Clear OEM keys** | Removes OEM activation registry keys |
-| **Skip license check registry** | Sets `TimeOfLastHeartbeatFailure` to `2040-01-01` to prevent "license status" banners |
-| **Uninstall other/grace keys** | Removes competing product keys (except Project/Visio if installed) |
-| **Refresh licenses** | Restarts `sppsvc` and reinstalls system tokens |
-
-### Phase 4: Exit (lines 272–274)
-
-Displays "Press any key to exit..." and terminates.
-
-## Embedded Resources
-
-### Product Key Database (`:ohookdata`, lines 2047–2598)
-
-The script contains an embedded table of Office product keys for versions 2010–2024, with format:
-
-```
-Version_ActivationID_Key_LicenseType_ProductName
+```bat
+officeDeploy.bat --unattended
 ```
 
-Keys are matched by product ID during activation. The table covers Retail, Volume (MAK/GVLK), OEM, Subscription, and Preview editions.
+Unattended mode:
 
-### Embedded DLLs
+- requires administrator privileges;
+- generates an unattended Office configuration;
+- downloads or reuses a validated Office Deployment Tool;
+- installs Microsoft 365 Apps without installation UI;
+- validates the installed Office files and Click-to-Run state;
+- writes a structured log;
+- returns a deterministic process exit code;
+- does **not** enter the legacy activation path.
 
-Two custom DLLs are embedded as base64-encoded data within the script:
+### Generate configuration only
 
-| Label | Architecture | Purpose |
-|---|---|---|
-| `:sppc32.dll:` (lines 2601–2664) | 32-bit | Hook DLL for x86 Office — intercepts `sppcs.dll` calls to bypass license validation |
-| `:sppc64.dll:` (lines 2671–2734) | 64-bit | Hook DLL for x64 Office — same function, 64-bit ABI |
+To generate and validate `Configuration.xml` without downloading or installing Office:
 
-These are "Ohook" DLLs from MAS — they implement a subset of the `sppc.dll` API to return successful license responses without requiring a real product key.
+```bat
+officeDeploy.bat --unattended --config-only
+```
 
-## Subroutine Reference
+This mode:
 
-### Activation Subroutines (`oh_*`)
+- does not require administrator privileges;
+- does not download `setup.exe`;
+- does not install Office;
+- does not modify licensing state;
+- does not enter the activation path.
 
-| Subroutine | Line | Purpose |
-|---|---|---|
-| `oh_activate_core` | 142 | Main activation orchestrator |
-| `oh_activate_o16c2r` | 190 | Activate Office 16.0 Click-to-Run |
-| `oh_activate_o15c2r` | 235 | Activate Office 15.0 Click-to-Run |
-| `oh_reset` | 276 | Clear activation variables |
-| `oh_getpath` | 299 | Detect installed Office versions via registry |
-| `oh_expiredpreview` | 326 | Check for expired preview licenses |
-| `oh_ppcpath` | 348 | Determine hook DLL and OSPP paths by architecture |
-| `oh_fixprids` | 394 | Fix corrupted ProductReleaseIds registry |
-| `oh_installlic` | 424 | Install license files (.xrm-ms) |
-| `oh_hookinstall` | 474 | Install Ohook DLL via symlink + extract |
-| `oh_hookinstall_ospp` | 531 | Install Ohook for OSPP (Office 2010 / Win 7) |
-| `oh_setspp` | 658 | Set SPP/OSPP service names |
-| `oh_process` | 678 | Process each product: install key + license + hook |
-| `oh_processmsi` | 723 | Process MSI Office installations |
-| `oh_clearblock` | 781 | Remove vNext/shared/device license blocks |
-| `oh_uninstkey` | 948 | Uninstall competing product keys |
-| `oh_licrefresh` | 990 | Refresh Windows Insider Preview licenses |
-| `oh_checkapps` | 1002 | Check for running Office applications |
-| `oh_hookinstall_error` | 627 | Handle hook installation errors |
+### Help
 
-### Diagnostic Subroutines (`dk_*`)
+```bat
+officeDeploy.bat --help
+```
 
-| Subroutine | Line | Purpose |
-|---|---|---|
-| `dk_setvar` | 1030 | Initialize variables (PowerShell path, colors, services) |
-| `dk_reflection` | 1248 | Set up .NET reflection for P/Invoke |
-| `dk_ckeckwmic` | 1199 | Check if WMIC is available |
-| `dk_product` | 1230 | Get Windows edition name |
-| `dk_showosinfo` | 1084 | Display OS version, build, architecture |
-| `dk_actids` | 1138 | Get all activation IDs for an application |
-| `dk_actid` | 1164 | Get activated (key-installed) product IDs |
-| `dk_inskey` | 1110 | Install a product key via WMI |
-| `dk_refresh` | 1102 | Refresh license status via WMI |
-| `dk_errorcheck` | 1300 | Comprehensive system diagnostic (services, WMI, SPP, tokens, WPA registry, etc.) |
-| `dk_chkmal` | 1257 | Check for malware/PUP activators (KMSpico, blocked AV URLs, file infector signs) |
-| `dk_color` | 1970 | Print colored console output |
-| `dk_color2` | 1981 | Print two-color console output |
-| `dk_done` | 1994 | Final prompt and optional support webpage links |
+---
 
-## Supported Office Versions
+## Command Line
 
-| Version | Type | Support |
-|---|---|---|
-| Office 2010 (14.0) | MSI | Full — via OSPP hook |
-| Office 2013 (15.0) | C2R + MSI | Full |
-| Office 2016 (16.0) | C2R + MSI | Full |
-| Office 2019 (16.0) | C2R + MSI | Full |
-| Office 2021 (16.0) | C2R + MSI | Full |
-| Office 2024 (16.0) | C2R + MSI | Full |
-| Microsoft 365 Apps | C2R | Full (installs + activates) |
+| Command | Description |
+|---|---|
+| `officeDeploy.bat` | Interactive deployment |
+| `officeDeploy.bat --unattended` | Full unattended deployment |
+| `officeDeploy.bat --unattended --config-only` | Generate and validate configuration only |
+| `officeDeploy.bat --help` | Display command usage |
 
-## Customization
+The parser accepts unattended/config-only arguments in either order.
 
-To modify the installation, edit the XML configuration block generated at lines 87–108:
+For example:
 
-- **Language**: Change `Language ID="zh-cn"` to `en-us` or another locale
-- **Edition**: Change `Product ID="O365ProPlusRetail"` to `VisioPro2024Volume`, `ProjectPro2024Volume`, etc.
-- **Architecture**: Change `OfficeClientEdition="64"` to `"32"`
-- **Channel**: Change `MonthlyEnterprise` to `Current`, `Deferred`, etc.
-- **Excluded apps**: Add/remove `<ExcludeApp ID="..." />` entries
+```bat
+officeDeploy.bat --config-only --unattended
+```
+
+is equivalent to:
+
+```bat
+officeDeploy.bat --unattended --config-only
+```
+
+---
+
+## Default Office Configuration
+
+The generated `Configuration.xml` currently deploys:
+
+| Setting | Value |
+|---|---|
+| Product | Microsoft 365 Apps for enterprise |
+| Product ID | `O365ProPlusRetail` |
+| Architecture | 64-bit |
+| Update channel | `MonthlyEnterprise` |
+| Language | `zh-cn` |
+| Office updates | Disabled by configuration |
+| Existing MSI Office | Removed through `RemoveMSI` |
+
+The following applications are excluded by default:
+
+- Groove
+- Lync
+- OneDrive
+- Outlook for Windows
+- Teams
+
+Display behavior depends on execution mode:
+
+| Mode | ODT display level |
+|---|---|
+| Interactive | `Full` |
+| Unattended | `None` |
+
+Both modes generate the same Office deployment configuration apart from the display level.
+
+---
+
+## Deployment Flow
+
+### Interactive
+
+```text
+Start
+  ↓
+Parse arguments
+  ↓
+Native architecture check
+  ↓
+Administrator check
+  ↓
+Product menu
+  ↓
+Generate Configuration.xml
+  ↓
+Validate / obtain Office Deployment Tool
+  ↓
+Install Microsoft 365 Apps
+  ↓
+Verify installation
+  ↓
+Legacy interactive post-install path
+  ↓
+Exit
+```
+
+### Unattended
+
+```text
+Start
+  ↓
+Parse arguments
+  ↓
+Native architecture check
+  ↓
+Administrator check
+  ↓
+Generate unattended Configuration.xml
+  ↓
+Validate / obtain Office Deployment Tool
+  ↓
+Install Microsoft 365 Apps
+  ↓
+Verify installation
+  ↓
+Write result and exit code
+```
+
+Unattended execution deliberately bypasses the legacy activation path.
+
+---
+
+## Office Deployment Tool Handling
+
+The script does not blindly trust an existing `setup.exe`.
+
+ODT acquisition follows a recoverable flow:
+
+```text
+Existing setup.exe
+      ↓
+Validate file
+   ↙       ↘
+Valid     Invalid
+  ↓          ↓
+Reuse      Remove
+              ↓
+      Download temporary file
+              ↓
+        Validate temporary
+              ↓
+      Promote to setup.exe
+```
+
+Validation includes:
+
+- file existence;
+- non-zero file size;
+- valid Windows Authenticode signature.
+
+Downloads are first written to:
+
+```text
+setup.exe.download.tmp
+```
+
+The temporary file is promoted to:
+
+```text
+setup.exe
+```
+
+only after validation succeeds.
+
+This prevents an interrupted or incomplete download from becoming the cached executable used by a later run.
+
+---
+
+## Generated Files
+
+| Path | Purpose |
+|---|---|
+| `Configuration.xml` | Generated Office Deployment Tool configuration |
+| `setup.exe` | Validated Office Deployment Tool executable |
+| `setup.exe.download.tmp` | Temporary ODT download before validation |
+
+Unattended execution also writes:
+
+```text
+%TEMP%\office-deploy\office-deploy.log
+```
+
+The log contains execution information such as:
+
+```text
+MODE
+CONFIG_ONLY
+SCRIPT_PATH
+WINDOWS_VERSION
+PROCESSOR_ARCHITECTURE
+NATIVE_RELAUNCH
+ADMIN_CHECK
+ODT_SOURCE
+ODT_EXIT_CODE
+VERIFY_RESULT
+RESULT
+EXIT_CODE
+```
+
+---
+
+## Exit Codes
+
+Automation can rely on the following stable exit-code contract:
+
+| Code | Meaning |
+|---:|---|
+| `0` | Success |
+| `2` | Invalid command-line arguments |
+| `10` | Administrator privileges required |
+| `20` | Environment validation failed |
+| `30` | ODT download / transport failed |
+| `31` | ODT validation, cache recovery, or promotion failed |
+| `40` | Configuration generation or validation failed |
+| `50` | Office Deployment Tool installation failed |
+| `60` | Post-install verification failed |
+| `70` | Internal or unexpected failure |
+
+Underlying PowerShell or ODT error values may also be recorded in the unattended log for diagnostics.
+
+---
+
+## Architecture Handling
+
+The script detects whether it is running under a redirected Windows command environment.
+
+On x64 Windows, a 32-bit invocation can be relaunched synchronously through:
+
+```text
+SysWOW64 cmd.exe
+    ↓
+Sysnative cmd.exe
+    ↓
+native officeDeploy.bat
+```
+
+The native child exit code is propagated back to the original caller.
+
+The parser preserves `%0`, so `%~f0` and `%~dp0` continue to refer to the real batch file after argument processing.
+
+An ARM64 / `SysArm32` path is also present in the script, but it is not currently covered by the x64 GitHub-hosted runtime test matrix.
+
+---
+
+## Runtime CI
+
+The repository includes:
+
+```text
+.github/workflows/windows-runtime.yml
+```
+
+The workflow runs on:
+
+| Environment | Runtime coverage |
+|---|---|
+| Windows Server 2022 | ✅ |
+| Windows Server 2025 | ✅ |
+
+The runtime suite validates the Batch control flow without downloading ODT or installing Microsoft 365.
+
+Coverage includes:
+
+- `--help`;
+- invalid argument handling;
+- config-only argument validation;
+- forward and reverse argument ordering;
+- runtime generation and parsing of `Configuration.xml`;
+- unattended log output;
+- script-relative paths;
+- execution from another working directory;
+- paths containing spaces;
+- invalid cached ODT recovery;
+- deterministic exit code `31`;
+- real 32-bit `SysWOW64\cmd.exe` execution;
+- WOW64 → `Sysnative` relaunch;
+- native child → parent exit-code propagation;
+- native child `SCRIPT_PATH` preservation.
+
+See:
+
+```text
+.github/workflows/windows-runtime.yml
+```
+
+for the complete assertions.
+
+### CI safety boundary
+
+The runtime workflow intentionally does **not**:
+
+- download the Office Deployment Tool from the network;
+- execute `setup.exe /configure`;
+- install Microsoft 365;
+- execute the activation path;
+- execute Ohook;
+- test ARM64 / `SysArm32`.
+
+These belong to separate validation stages.
+
+---
+
+## Compatibility
+
+The project distinguishes between **implemented code paths** and **runtime-verified environments**.
+
+| Platform | Status |
+|---|---|
+| Windows Server 2022 x64 | Runtime CI verified |
+| Windows Server 2025 x64 | Runtime CI verified |
+| Windows 10 / 11 x64 | Expected target environment; not currently covered by GitHub-hosted runtime CI |
+| Windows ARM64 | Architecture path implemented; runtime validation pending |
+| Legacy Windows / PowerShell environments | Not part of the current verified compatibility baseline |
+
+Do not interpret older README history or legacy activation code paths as a current support guarantee.
+
+---
+
+## Security Model
+
+The deployment path includes several defensive controls:
+
+- ODT paths are relative to the script rather than the caller's working directory;
+- network downloads use a temporary file;
+- ODT is validated before execution;
+- invalid cached ODT files are removed and recovered automatically;
+- unattended execution returns deterministic failure codes;
+- CI runs with read-only repository permissions;
+- CI uses `pull_request`, not `pull_request_target`;
+- runtime CI does not use repository secrets;
+- runtime CI never executes Office installation or activation.
+
+As with any script that installs system-wide software, inspect the source before running it with administrator privileges.
+
+---
+
+## Repository Layout
+
+```text
+office-deploy/
+├── .github/
+│   └── workflows/
+│       └── windows-runtime.yml
+├── .gitignore
+├── README.md
+└── officeDeploy.bat
+```
+
+`officeDeploy.bat` is intentionally the primary implementation file.
+
+---
+
+## Development
+
+When modifying the Batch script:
+
+1. keep interactive and unattended behavior separate where their requirements differ;
+2. preserve the stable exit-code contract;
+3. avoid depending on the current working directory;
+4. capture `%ERRORLEVEL%` immediately after commands whose result matters;
+5. preserve `%0` during argument parsing;
+6. do not bypass ODT validation;
+7. keep unattended execution free of `choice`, `pause`, and activation;
+8. add or update Windows Runtime CI assertions for behavior changes.
+
+Before merging, Windows Runtime CI should pass on both configured Windows runners.
+
+---
+
+## Current Validation Boundary
+
+The following areas are **not yet covered by automated E2E validation**:
+
+- live ODT network download;
+- full Microsoft 365 installation;
+- post-install verification against a freshly installed Office environment;
+- Windows client editions through GitHub-hosted runners;
+- ARM64 / `SysArm32`;
+- activation.
+
+A future Office E2E workflow should remain separate from the lightweight Runtime CI.
+
+---
+
+## Attribution
+
+Parts of the legacy activation-related implementation were derived from the **Microsoft Activation Scripts (MAS)** project.
+
+Upstream project:
+
+`massgravel/Microsoft-Activation-Scripts`
+
+The deployment and unattended-control layers in this repository should be treated separately from the inherited activation implementation.
+
+---
+
+## Licensing Notice
+
+This repository currently does not include a standalone `LICENSE` file.
+
+Before redistribution, packaging, or accepting broader third-party contributions, review the licensing requirements of all upstream-derived code and add an explicit repository license where appropriate.
+
+---
+
+## Disclaimer
+
+This project is not affiliated with or endorsed by Microsoft.
+
+Microsoft, Windows, Office, and Microsoft 365 are trademarks of Microsoft and/or its affiliates.
+
+Users are responsible for complying with applicable Microsoft licensing terms and for using properly licensed software.
