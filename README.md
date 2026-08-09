@@ -229,9 +229,9 @@ The preflight is limited to interactive option `[1]`. It is read-only: it does n
 It combines two existing definitions rather than introducing another Office detector:
 
 - `:probe_target_office` checks the Click-to-Run configuration for `O365ProPlusRetail`, `x64`, a non-empty version and installation path, and the `WINWORD.EXE`, `EXCEL.EXE`, and `POWERPNT.EXE` files. Post-install verification delegates to this same probe.
-- `:oh_check_supported_office` remains the broader shared detector for supported C2R/MSI and 32/64-bit Office. It requires the corresponding registry and marker-file evidence and rejects a C2R candidate whose required service is missing.
+- `:oh_check_supported_office` remains the broader shared detector for supported C2R/MSI and 32/64-bit Office. It requires the corresponding registry and marker-file evidence and rejects a C2R candidate whose required service is missing. Its explicit `SUPPORTED_PROBE_OK` / `SUPPORTED_PROBE_ERROR` operational channel distinguishes expected absence from failures of `reg.exe`, registry access, SCM access, service queries, or internal detector state.
 
-The resulting interactive states are `NONE`, `TARGET_INSTALLED`, `OTHER_OFFICE`, `BROKEN_OFFICE`, and `DETECTION_ERROR`. Detection errors fail closed and never enter installation automatically. These are internal states only; the documented CLI exit-code contract is unchanged.
+The resulting interactive states are `NONE`, `TARGET_INSTALLED`, `OTHER_OFFICE`, `BROKEN_OFFICE`, and `DETECTION_ERROR`. Failures from either the exact target probe or the broader supported-Office probe become `DETECTION_ERROR`, fail closed, and never enter installation automatically. These are internal states only; the documented CLI exit-code contract is unchanged.
 
 ---
 
@@ -403,7 +403,7 @@ Coverage includes:
 - the C2R service state machine in a fully stubbed test copy: missing service fails immediately, stopped service is started once and succeeds, an unstartable service fails within the bound, and Office 15 accepts a running `OfficeSvc` fallback (`T18c`);
 - Windows Server detection against the real Server 2022 and Server 2025 runner registry, which must establish `winserver=1` (`T19`);
 - activation-core fail-closed behavior: a copied core with forced readiness failure must return non-zero before product processing, Generic Key installation, Ohook installation, or license cleanup (`T20`);
-- the installation-preflight detector state machine against mocked registry, marker-file, application-file, service, architecture, incomplete-install, and unavailable-PowerShell fixtures (`T21`);
+- the installation-preflight detector state machine against mocked registry, marker-file, application-file, service, architecture, incomplete-install, unavailable-PowerShell, and broad-detector operational-failure fixtures (`T21`);
 - the real interactive option `[1]` preflight control flow: `NONE` continues; `TARGET_INSTALLED`, `OTHER_OFFICE`, and `BROKEN_OFFICE` exercise their Return/Continue mappings; and `DETECTION_ERROR` cannot silently enter installation (`T22`, instruments a test bat copy and stops before ODT/network/install).
 
 See:

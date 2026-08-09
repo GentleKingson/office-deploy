@@ -939,6 +939,9 @@ jobs:
             'call :dk_errorcheck',
             'call :oh_setspp',
             'call :oh_check_supported_office',
+            'set "_supportedOfficeProbeExit=!ERRORLEVEL!"',
+            'if not "!_supportedOfficeProbeExit!"=="0"',
+            'if /i not "!_supportedProbeStatus!"=="SUPPORTED_PROBE_OK"',
             'call :oh_detect_windows_server',
             'call :oh_wait_licensing_ready'
           )
@@ -1242,7 +1245,7 @@ jobs:
 
           $text = $text.Replace('call :dk_sppissue', 'rem T20 dk_sppissue stub')
           $text = $text.Replace('call :dk_errorcheck', 'rem T20 dk_errorcheck stub')
-          $text = $text.Replace('call :oh_check_supported_office', 'set "o16c2r=1"')
+          $text = $text.Replace('call :oh_check_supported_office', "set `"o16c2r=1`"`r`nset `"_supportedProbeStatus=SUPPORTED_PROBE_OK`"`r`ncmd /d /c exit 0")
           $text = $text.Replace('call :oh_wait_licensing_ready', 'call :t20_readiness_fail')
 
           $dispatcher = @'
@@ -1304,8 +1307,9 @@ jobs:
       # ----------------------------------------------------------------------
       # T21: installation-preflight detector state machine. A copied bat gets
       # a dispatcher that calls only :detect_office_install_state. Registry,
-      # marker-file, application-file, and service fixtures are all local to
-      # the ephemeral runner. No menu, ODT, install, or activation path runs.
+      # marker-file, application-file, service, and detector-operational-error
+      # fixtures are local to the runner. No menu, ODT, install, or activation
+      # path runs.
       # ----------------------------------------------------------------------
       - name: T21 Installation preflight detector
         shell: cmd
@@ -1321,7 +1325,7 @@ jobs:
           :: Inject a top-level dispatcher into the COPY. Literal ! characters
           :: are assembled inside PowerShell so this outer delayed-expansion
           :: block cannot consume the probe's runtime variable references.
-          powershell -NoProfile -Command "$f='%ROOT%\install-preflight-detect\officeDeploy.bat'; $nl=[char]13+[char]10; $x=[char]33; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $d='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if not defined _T21_PROBE goto :t21_done'+$nl+'call :detect_office_install_state'+$nl+'set _t21rc='+$x+'errorlevel'+$x+$nl+'echo PROBE_OFFICE_STATE='+$x+'_officeState'+$x+$nl+'echo PROBE_TARGET_STATE='+$x+'_targetProbeState'+$x+$nl+'echo PROBE_TARGET_REASON='+$x+'_targetProbeReason'+$x+$nl+'exit /b '+$x+'_t21rc'+$x+$nl+':t21_done'+$nl+'@set masver=3.10'; if(-not $t.StartsWith($old)){exit 1}; $t=$d+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
+          powershell -NoProfile -Command "$f='%ROOT%\install-preflight-detect\officeDeploy.bat'; $nl=[char]13+[char]10; $x=[char]33; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $d='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if not defined _T21_PROBE goto :t21_done'+$nl+'call :detect_office_install_state'+$nl+'set _t21rc='+$x+'errorlevel'+$x+$nl+'echo PROBE_OFFICE_STATE='+$x+'_officeState'+$x+$nl+'echo PROBE_TARGET_STATE='+$x+'_targetProbeState'+$x+$nl+'echo PROBE_TARGET_REASON='+$x+'_targetProbeReason'+$x+$nl+'echo PROBE_SUPPORTED_STATUS='+$x+'_supportedProbeResult'+$x+$nl+'exit /b '+$x+'_t21rc'+$x+$nl+':t21_done'+$nl+'@set masver=3.10'; if(-not $t.StartsWith($old)){exit 1}; $t=$d+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T21] FAIL: dispatcher injection failed & exit /b 1 )
           findstr /c:"_T21_PROBE" "officeDeploy.bat" >nul && ( echo [T21] FAIL: test seam present in production bat & exit /b 1 )
 
@@ -1338,6 +1342,7 @@ jobs:
           if not "!RC!"=="0" ( echo [T21a] FAIL: detector exit !RC! & type "%ROOT%\install-preflight-detect\a.out" & exit /b 1 )
           findstr /x /c:"PROBE_OFFICE_STATE=NONE" "%ROOT%\install-preflight-detect\a.out" >nul || ( echo [T21a] FAIL: expected NONE & type "%ROOT%\install-preflight-detect\a.out" & exit /b 1 )
           findstr /x /c:"PROBE_TARGET_STATE=NO_TARGET" "%ROOT%\install-preflight-detect\a.out" >nul || ( echo [T21a] FAIL: expected NO_TARGET & type "%ROOT%\install-preflight-detect\a.out" & exit /b 1 )
+          findstr /x /c:"PROBE_SUPPORTED_STATUS=SUPPORTED_PROBE_OK" "%ROOT%\install-preflight-detect\a.out" >nul || ( echo [T21a] FAIL: expected successful broad probe & exit /b 1 )
           echo [T21a] PASS no-office=NONE
 
           :: Shared healthy C2R fixture for T21b/c/d.
@@ -1407,6 +1412,7 @@ jobs:
           if not "!RC!"=="0" ( echo [T21f] FAIL: detector exit !RC! & type "%ROOT%\install-preflight-detect\f.out" & exit /b 1 )
           findstr /x /c:"PROBE_OFFICE_STATE=BROKEN_OFFICE" "%ROOT%\install-preflight-detect\f.out" >nul || ( echo [T21f] FAIL: expected BROKEN_OFFICE & type "%ROOT%\install-preflight-detect\f.out" & exit /b 1 )
           findstr /c:"Not found, Office 16.0 files found" "%ROOT%\install-preflight-detect\f.out" >nul || ( echo [T21f] FAIL: broken-service evidence missing & exit /b 1 )
+          findstr /x /c:"PROBE_SUPPORTED_STATUS=SUPPORTED_PROBE_OK" "%ROOT%\install-preflight-detect\f.out" >nul || ( echo [T21f] FAIL: service 1060 misclassified as operational error & exit /b 1 )
           echo [T21f] PASS missing-c2r-service=BROKEN_OFFICE
 
           :: ---- T21g: unavailable PowerShell -> DETECTION_ERROR ----
@@ -1421,11 +1427,25 @@ jobs:
           findstr /x /c:"PROBE_TARGET_STATE=PROBE_ERROR" "%ROOT%\install-preflight-detect\g.out" >nul || ( echo [T21g] FAIL: expected PROBE_ERROR & exit /b 1 )
           echo [T21g] PASS powershell-unavailable=DETECTION_ERROR
 
+          :: ---- T21h: broad detector operational failure -> DETECTION_ERROR ----
+          :: Instrument only the COPY's explicit broad-registry health probe.
+          :: The exact PowerShell target probe still runs normally and returns
+          :: NO_TARGET; the failing broad channel must prevent NONE/install.
+          powershell -NoProfile -Command "$f='%ROOT%\install-preflight-detect\officeDeploy.bat'; $q=[char]34; $p=[char]37; $old='reg query '+$q+'HKLM\SOFTWARE'+$q+' '+$p+'nul'+$p; $t=[IO.File]::ReadAllText($f); if(-not $t.Contains($old)){exit 1}; $t=$t.Replace($old,'cmd /d /c exit 9'); [IO.File]::WriteAllText($f,$t); exit 0"
+          if !ERRORLEVEL! NEQ 0 ( echo [T21h] FAIL: broad-probe anchor not found & exit /b 1 )
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\h.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if "!RC!"=="0" ( echo [T21h] FAIL: detector unexpectedly succeeded & type "%ROOT%\install-preflight-detect\h.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=DETECTION_ERROR" "%ROOT%\install-preflight-detect\h.out" >nul || ( echo [T21h] FAIL: expected DETECTION_ERROR & type "%ROOT%\install-preflight-detect\h.out" & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_STATE=NO_TARGET" "%ROOT%\install-preflight-detect\h.out" >nul || ( echo [T21h] FAIL: expected exact NO_TARGET & exit /b 1 )
+          findstr /x /c:"PROBE_SUPPORTED_STATUS=SUPPORTED_PROBE_ERROR" "%ROOT%\install-preflight-detect\h.out" >nul || ( echo [T21h] FAIL: broad operational status missing & type "%ROOT%\install-preflight-detect\h.out" & exit /b 1 )
+          echo [T21h] PASS broad-operational-failure=DETECTION_ERROR
+
           set "_T21_PROBE="
           for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
           sc delete ClickToRunSvc >nul 2>nul
           sc delete OfficeSvc >nul 2>nul
-          echo [T21] PASS detector-state-machine no-odt no-install no-activation
+          echo [T21] PASS detector-state-machine operational-fail-closed no-odt no-install no-activation
           exit /b 0
 
       # ----------------------------------------------------------------------
@@ -1492,7 +1512,7 @@ jobs:
           findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\target-continue\run.out" >nul || ( echo [T22c] FAIL: install1 not reached & exit /b 1 )
           echo [T22c] PASS target-continue=config-created
 
-          :: ---- T22d: DETECTION_ERROR fails closed and never enters install1 ----
+          :: ---- T22d: any exact/broad DETECTION_ERROR never enters install1 ----
           set "TEMP=%ROOT%\install-preflight-flow\detection-error\temp"
           set "TMP=!TEMP!"
           set "_T22_STATE=DETECTION_ERROR"

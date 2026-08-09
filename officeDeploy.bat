@@ -368,6 +368,16 @@ echo Checking for an installed Microsoft Office...
 :: core can never disagree on what counts as a supported install. The
 :: helper defines nul/nul6 itself, so no variable setup is needed here.
 call :oh_check_supported_office
+set "_supportedOfficeProbeExit=!ERRORLEVEL!"
+set "_supportedOfficeProbeFailed="
+if not "!_supportedOfficeProbeExit!"=="0" set "_supportedOfficeProbeFailed=1"
+if /i not "!_supportedProbeStatus!"=="SUPPORTED_PROBE_OK" set "_supportedOfficeProbeFailed=1"
+if defined _supportedOfficeProbeFailed (
+    echo Microsoft Office installation detection failed.
+    set "_exitCode=70"
+    set "_result=FAILED"
+    goto finish
+)
 if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
     echo No supported Microsoft Office installation was found.
     set "_exitCode=70"
@@ -422,6 +432,15 @@ call :dk_errorcheck
 
 call :oh_setspp
 call :oh_check_supported_office
+set "_supportedOfficeProbeExit=!ERRORLEVEL!"
+if not "!_supportedOfficeProbeExit!"=="0" (
+    echo Microsoft Office detection failed.
+    exit /b 1
+)
+if /i not "!_supportedProbeStatus!"=="SUPPORTED_PROBE_OK" (
+    echo Microsoft Office detection failed.
+    exit /b 1
+)
 :: Defense-in-depth fail-fast: if no supported Office was detected (also
 :: catches a C2R install whose ClickToRun service is gone, via the shared
 :: helper), abort before any per-product activation routine and before the
@@ -674,6 +693,8 @@ set "_supportedO16MSI="
 set "_supportedO15MSI="
 set "_supportedO14MSI="
 set "_supportedDetectionError="
+set "_supportedProbeExit="
+set "_supportedProbeResult="
 call :probe_target_office
 set "_targetProbeExit=!ERRORLEVEL!"
 if not "!_targetProbeExit!"=="0" exit /b 1
@@ -681,6 +702,8 @@ if /i "!_targetProbeState!"=="PROBE_ERROR" exit /b 1
 
 call :reset_office_detection_state
 call :oh_check_supported_office
+set "_supportedProbeExit=!ERRORLEVEL!"
+set "_supportedProbeResult=!_supportedProbeStatus!"
 set "_supportedO16C2R=!o16c2r!"
 set "_supportedO15C2R=!o15c2r!"
 set "_supportedO16MSI=!o16msi!"
@@ -688,6 +711,8 @@ set "_supportedO15MSI=!o15msi!"
 set "_supportedO14MSI=!o14msi!"
 set "_supportedDetectionError=!error!"
 call :reset_office_detection_state
+if not "!_supportedProbeExit!"=="0" exit /b 1
+if /i not "!_supportedProbeResult!"=="SUPPORTED_PROBE_OK" exit /b 1
 
 if /i "!_targetProbeState!"=="TARGET_INSTALLED" (
     if defined _supportedDetectionError (set "_officeState=BROKEN_OFFICE") else if defined _supportedO16C2R (set "_officeState=TARGET_INSTALLED") else set "_officeState=BROKEN_OFFICE"
@@ -878,6 +903,7 @@ set "o15c2r_reg="
 set "o16msi_reg="
 set "o15msi_reg="
 set "o14msi_reg="
+set "_supportedProbeStatus="
 set "error="
 exit /b 0
 
@@ -889,31 +915,62 @@ exit /b 0
 ::  Ohook_Activation_AIO.cmd (sc query ClickToRunSvc / OfficeSvc; 1060 means
 ::  the service does not exist). Sets `error=1` when a C2R candidate is
 ::  judged broken (service missing) -- even if another valid Office (e.g.
-::  MSI) remains on the machine. Callers reset `error` BEFORE calling this
-::  helper, matching upstream ordering, so the error survives to the result.
+::  MSI) remains on the machine. Separately exposes _supportedProbeStatus as
+::  SUPPORTED_PROBE_OK or SUPPORTED_PROBE_ERROR. Executable/registry/SCM
+::  health failures and unexpected candidate-service query results are
+::  operational errors, not evidence that Office is absent. Operational
+::  failure clears all detected flags and returns non-zero, keeping every
+::  caller fail-closed. Callers reset `error` BEFORE calling this helper,
+::  matching upstream ordering, so broken/install errors survive the result.
 ::  Self-contained: defines %nul% and %nul6% itself, so callers need no
 ::  variable setup (:oh_getpath reads %nul6%; the service checks read %nul%).
 :oh_check_supported_office
+set "_supportedProbeStatus=SUPPORTED_PROBE_ERROR"
 set "nul=>nul 2>&1"
 set "nul6=2^>nul"
+where reg.exe >nul 2>nul
+if not "!ERRORLEVEL!"=="0" goto oh_supported_probe_error
+where sc.exe >nul 2>nul
+if not "!ERRORLEVEL!"=="0" goto oh_supported_probe_error
+reg query "HKLM\SOFTWARE" %nul%
+if not "!ERRORLEVEL!"=="0" goto oh_supported_probe_error
+sc query EventLog %nul%
+if not "!ERRORLEVEL!"=="0" goto oh_supported_probe_error
 call :oh_getpath
+if defined o16c2r if not defined o16c2r_reg goto oh_supported_probe_error
+if defined o15c2r if not defined o15c2r_reg goto oh_supported_probe_error
+if defined o16msi if not defined o16msi_reg goto oh_supported_probe_error
+if defined o15msi if not defined o15msi_reg goto oh_supported_probe_error
+if defined o14msi if not defined o14msi_reg goto oh_supported_probe_error
 sc query ClickToRunSvc %nul%
-set _ohSvcErr1=%errorlevel%
+set "_ohSvcErr1=!ERRORLEVEL!"
 sc query OfficeSvc %nul%
-set _ohSvcErr2=%errorlevel%
-if defined o16c2r if "%_ohSvcErr1%"=="1060" (
+set "_ohSvcErr2=!ERRORLEVEL!"
+if defined o16c2r if not "!_ohSvcErr1!"=="0" if not "!_ohSvcErr1!"=="1060" goto oh_supported_probe_error
+if defined o15c2r if not "!_ohSvcErr1!"=="0" if not "!_ohSvcErr1!"=="1060" goto oh_supported_probe_error
+if defined o15c2r if not "!_ohSvcErr2!"=="0" if not "!_ohSvcErr2!"=="1060" goto oh_supported_probe_error
+if defined o16c2r if "!_ohSvcErr1!"=="1060" (
     echo Checking ClickToRun Service             [Not found, Office 16.0 files found]
     set "o16c2r="
     set "error=1"
 )
-if defined o15c2r if "%_ohSvcErr1%"=="1060" if "%_ohSvcErr2%"=="1060" (
+if defined o15c2r if "!_ohSvcErr1!"=="1060" if "!_ohSvcErr2!"=="1060" (
     echo Checking ClickToRun Service             [Not found, Office 15.0 files found]
     set "o15c2r="
     set "error=1"
 )
 set "_ohSvcErr1="
 set "_ohSvcErr2="
-exit /b
+set "_supportedProbeStatus=SUPPORTED_PROBE_OK"
+exit /b 0
+
+:oh_supported_probe_error
+set "_ohSvcErr1="
+set "_ohSvcErr2="
+call :reset_office_detection_state
+set "_supportedProbeStatus=SUPPORTED_PROBE_ERROR"
+set "error=1"
+exit /b 1
 
 ::  Establish the MAS Windows Server flag used by :oh_process.
 :oh_detect_windows_server
