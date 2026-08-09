@@ -404,7 +404,7 @@ Coverage includes:
 - Windows Server detection against the real Server 2022 and Server 2025 runner registry, which must establish `winserver=1` (`T19`);
 - activation-core fail-closed behavior: a copied core with forced readiness failure must return non-zero before product processing, Generic Key installation, Ohook installation, or license cleanup (`T20`);
 - the installation-preflight detector state machine against mocked registry, marker-file, application-file, service, architecture, incomplete-install, and unavailable-PowerShell fixtures (`T21`);
-- the real interactive option `[1]` preflight control flow: `NONE` continues, an existing target can return or continue, and detection failure cannot silently enter installation (`T22`, instruments a test bat copy and stops before ODT/network/install).
+- the real interactive option `[1]` preflight control flow: `NONE` continues; `TARGET_INSTALLED`, `OTHER_OFFICE`, and `BROKEN_OFFICE` exercise their Return/Continue mappings; and `DETECTION_ERROR` cannot silently enter installation (`T22`, instruments a test bat copy and stops before ODT/network/install).
 
 See:
 

@@ -1450,7 +1450,7 @@ jobs:
           if !ERRORLEVEL! NEQ 0 ( echo [T22] FAIL: instrumentation failed & exit /b 1 )
           findstr /c:"_T22_STATE" "officeDeploy.bat" >nul && ( echo [T22] FAIL: test seam present in production bat & exit /b 1 )
 
-          for %%C in (none target-return target-continue detection-error) do (
+          for %%C in (none target-return target-continue detection-error other-return other-continue broken-return broken-continue) do (
             mkdir "%ROOT%\install-preflight-flow\%%C" >nul 2>nul
             mkdir "%ROOT%\install-preflight-flow\%%C\temp" >nul 2>nul
             copy /y "%ROOT%\install-preflight-flow\base\officeDeploy.bat" "%ROOT%\install-preflight-flow\%%C\officeDeploy.bat" >nul
@@ -1506,14 +1506,66 @@ jobs:
           findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\detection-error\run.out" >nul && ( echo [T22d] FAIL: silently entered install1 & exit /b 1 )
           echo [T22d] PASS detection-error=fail-closed-no-config
 
+          :: ---- T22e: OTHER_OFFICE + Return never enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\other-return\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=OTHER_OFFICE"
+          :: 1 = main Install, 2 = Return, 3 = main Exit; CR/LF feeds pause.
+          echo 123| call "%ROOT%\install-preflight-flow\other-return\officeDeploy.bat" > "%ROOT%\install-preflight-flow\other-return\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22e] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\other-return\run.out" & exit /b 1 )
+          if exist "%ROOT%\install-preflight-flow\other-return\Configuration.xml" ( echo [T22e] FAIL: Configuration.xml created after Return & exit /b 1 )
+          findstr /c:"An existing Microsoft Office installation was detected," "%ROOT%\install-preflight-flow\other-return\run.out" >nul || ( echo [T22e] FAIL: OTHER_OFFICE message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\other-return\run.out" >nul && ( echo [T22e] FAIL: install1 reached after Return & exit /b 1 )
+          echo [T22e] PASS other-office-return=no-config
+
+          :: ---- T22f: OTHER_OFFICE + Continue enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\other-continue\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=OTHER_OFFICE"
+          :: 1 = main Install, 1 = Continue; CR/LF feeds pause after config.
+          echo 11| call "%ROOT%\install-preflight-flow\other-continue\officeDeploy.bat" > "%ROOT%\install-preflight-flow\other-continue\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22f] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\other-continue\run.out" & exit /b 1 )
+          if not exist "%ROOT%\install-preflight-flow\other-continue\Configuration.xml" ( echo [T22f] FAIL: Configuration.xml missing & type "%ROOT%\install-preflight-flow\other-continue\run.out" & exit /b 1 )
+          findstr /c:"An existing Microsoft Office installation was detected," "%ROOT%\install-preflight-flow\other-continue\run.out" >nul || ( echo [T22f] FAIL: OTHER_OFFICE message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\other-continue\run.out" >nul || ( echo [T22f] FAIL: install1 not reached & exit /b 1 )
+          echo [T22f] PASS other-office-continue=config-created
+
+          :: ---- T22g: BROKEN_OFFICE + Return never enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\broken-return\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=BROKEN_OFFICE"
+          :: 1 = main Install, 2 = Return, 3 = main Exit; CR/LF feeds pause.
+          echo 123| call "%ROOT%\install-preflight-flow\broken-return\officeDeploy.bat" > "%ROOT%\install-preflight-flow\broken-return\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22g] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\broken-return\run.out" & exit /b 1 )
+          if exist "%ROOT%\install-preflight-flow\broken-return\Configuration.xml" ( echo [T22g] FAIL: Configuration.xml created after Return & exit /b 1 )
+          findstr /c:"An incomplete or broken Microsoft Office installation was detected." "%ROOT%\install-preflight-flow\broken-return\run.out" >nul || ( echo [T22g] FAIL: BROKEN_OFFICE message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\broken-return\run.out" >nul && ( echo [T22g] FAIL: install1 reached after Return & exit /b 1 )
+          echo [T22g] PASS broken-office-return=no-config
+
+          :: ---- T22h: BROKEN_OFFICE + Continue enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\broken-continue\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=BROKEN_OFFICE"
+          :: 1 = main Install, 1 = Continue; CR/LF feeds pause after config.
+          echo 11| call "%ROOT%\install-preflight-flow\broken-continue\officeDeploy.bat" > "%ROOT%\install-preflight-flow\broken-continue\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22h] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\broken-continue\run.out" & exit /b 1 )
+          if not exist "%ROOT%\install-preflight-flow\broken-continue\Configuration.xml" ( echo [T22h] FAIL: Configuration.xml missing & type "%ROOT%\install-preflight-flow\broken-continue\run.out" & exit /b 1 )
+          findstr /c:"An incomplete or broken Microsoft Office installation was detected." "%ROOT%\install-preflight-flow\broken-continue\run.out" >nul || ( echo [T22h] FAIL: BROKEN_OFFICE message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\broken-continue\run.out" >nul || ( echo [T22h] FAIL: install1 not reached & exit /b 1 )
+          echo [T22h] PASS broken-office-continue=config-created
+
           :: Global safety assertions across every real option [1] scenario.
-          for %%C in (none target-return target-continue detection-error) do (
+          for %%C in (none target-return target-continue detection-error other-return other-continue broken-return broken-continue) do (
             findstr /c:"Downloading setup.exe from Microsoft CDN" "%ROOT%\install-preflight-flow\%%C\run.out" >nul && ( echo [T22] FAIL: %%C reached network download & exit /b 1 )
             if exist "%ROOT%\install-preflight-flow\%%C\setup.exe" ( echo [T22] FAIL: %%C setup.exe leaked & exit /b 1 )
             if exist "%ROOT%\install-preflight-flow\%%C\setup.exe.download.tmp" ( echo [T22] FAIL: %%C temp download leaked & exit /b 1 )
           )
           set "_T22_STATE="
-          echo [T22] PASS real-option-1-preflight no-network no-install no-activation
+          echo [T22] PASS all-five-states real-option-1-preflight no-network no-install no-activation
           exit /b 0
 
       - name: Upload runtime-contract artifacts
