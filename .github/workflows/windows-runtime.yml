@@ -1295,6 +1295,7 @@ jobs:
             }
           }
           Write-Host "[T20] PASS core-readiness-failure rc=$rc abort-before-product-key-hook-cleanup"
+          exit 0
 
       - name: Upload runtime-contract artifacts
         if: always()
