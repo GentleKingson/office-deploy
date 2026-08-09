@@ -14,6 +14,7 @@ A single-file Windows batch deployment utility for **Microsoft 365 Apps for ente
 The project focuses on:
 
 - interactive and unattended execution;
+- a read-only Office installation preflight for interactive option `[1]`;
 - Microsoft Office Deployment Tool-based installation;
 - script-relative configuration and download paths;
 - unattended configuration generation;
@@ -46,7 +47,7 @@ The interactive mode displays an action menu:
 [3] Exit
 ```
 
-- `[1] Install` performs the normal interactive Microsoft 365 installation flow, verifies the installed files, then enters the shared activation core. Before any product key or Ohook change, that core runs the MAS 3.10 licensing-health diagnostics and a bounded licensing-readiness gate. A missing ClickToRun service fails immediately; an existing stopped service gets one start attempt and is then polled; the licensing refresh is ready only when its WMI `ReturnValue` is zero.
+- `[1] Install` first performs a read-only Office installation preflight. It uses the same exact `O365ProPlusRetail` x64 product/file probe as post-install verification and the same broader supported-Office detector as activation. If the target Microsoft 365 Apps for enterprise installation already exists, the utility reports its detected version and platform and asks whether to return or continue deployment. Other or incomplete Office installations produce an explicit warning; a detector failure stops before configuration generation. Continuing performs the normal interactive installation flow, verifies the installed files, then enters the shared activation core. Before any product key or Ohook change, that core runs the MAS 3.10 licensing-health diagnostics and a bounded licensing-readiness gate.
 - `[2] Activate installed Office` only acts on Office that is already installed. It detects Office through the same MAS-derived detector the activation engine itself uses (`:oh_check_supported_office` → `:oh_getpath`, which requires the registry key **and** the Office marker file, both 32/64-bit aware, **plus** the upstream ClickToRun service validity check), then uses the same diagnostic, readiness, and Ohook core as `[1]`. It does not download or reinstall Office. Ohook is idempotent, so re-running `[2]` is safe; it reinstalls cleanly.
 
 > Both activation paths (`[1]` post-install and `[2]` Activate installed Office) share the repository's existing MAS-derived Ohook activation implementation. GitHub Actions does not execute Office activation.
@@ -64,6 +65,7 @@ officeDeploy.bat --unattended
 Unattended mode:
 
 - requires administrator privileges;
+- deliberately bypasses the interactive installation preflight and still runs ODT to converge the deployment configuration;
 - generates an unattended Office configuration;
 - downloads or reuses a validated Office Deployment Tool;
 - installs Microsoft 365 Apps without installation UI;
@@ -83,6 +85,7 @@ officeDeploy.bat --unattended --config-only
 This mode:
 
 - does not require administrator privileges;
+- does not run the Office installation preflight;
 - does not download `setup.exe`;
 - does not install Office;
 - does not modify licensing state;
@@ -169,6 +172,13 @@ Administrator check
   ↓
 Product menu
   ↓
+Read-only Office installation preflight
+  ├─ No Office → continue automatically
+  ├─ Target Microsoft 365 x64 → Return / Continue / Exit
+  ├─ Other Office → Continue / Return / Exit
+  ├─ Incomplete or broken Office → Continue / Return / Exit
+  └─ Detection error → Retry / Return / Exit
+  ↓
 Generate Configuration.xml
   ↓
 Validate / obtain Office Deployment Tool
@@ -211,6 +221,17 @@ Write result and exit code
 ```
 
 Unattended execution deliberately bypasses the legacy activation path.
+
+### Interactive installation preflight
+
+The preflight is limited to interactive option `[1]`. It is read-only: it does not generate XML, download ODT, uninstall Office, install Office, modify licensing state, or activate Office.
+
+It combines two existing definitions rather than introducing another Office detector:
+
+- `:probe_target_office` checks the Click-to-Run configuration for `O365ProPlusRetail`, `x64`, a non-empty version and installation path, and the `WINWORD.EXE`, `EXCEL.EXE`, and `POWERPNT.EXE` files. Post-install verification delegates to this same probe.
+- `:oh_check_supported_office` remains the broader shared detector for supported C2R/MSI and 32/64-bit Office. It requires the corresponding registry and marker-file evidence and rejects a C2R candidate whose required service is missing.
+
+The resulting interactive states are `NONE`, `TARGET_INSTALLED`, `OTHER_OFFICE`, `BROKEN_OFFICE`, and `DETECTION_ERROR`. Detection errors fail closed and never enter installation automatically. These are internal states only; the documented CLI exit-code contract is unchanged.
 
 ---
 
@@ -375,13 +396,15 @@ Coverage includes:
 - the `:oh_activate_core` fail-fast guard, which must abort before the mutating cleanup routines when no supported Office is present (`T13`);
 - the repository blob line-ending contract: the exact bytes Git stores for `officeDeploy.bat` are asserted, byte-for-byte, to be CRLF (`T14`);
 - running that same blob end-to-end via `call` and asserting a clean config-only run, with no batch-control-flow-break signature (English and Chinese) in the output (`T15`/`T15b`);
-- interactive option `[1]` configuration-generation regression: the real `choice [1] -> ERRORLEVEL=1 -> :write_config` control flow is driven through the interactive menu and must generate a valid `Configuration.xml` without `CONFIG_WRITE_FAILED`, stopping before ODT / network / install (`T16`, instruments a test bat copy);
+- interactive option `[1]` configuration-generation regression: the real `choice [1] -> preflight NONE -> :write_config` control flow is driven through the interactive menu and must generate a valid `Configuration.xml` without `CONFIG_WRITE_FAILED`, stopping before ODT / network / install (`T16`, instruments a test bat copy with a deterministic `NONE` detector result);
 - the `:write_config` ambient `ERRORLEVEL` contract: `:write_config` must succeed and emit a valid `Configuration.xml` regardless of any `ERRORLEVEL` inherited from its caller (`T16b`, instruments a test bat copy);
 - the activation-core ordering contract: the single early `error` reset, MAS 3.10 preflight, Office detection, Server detection, and the immediately adjacent `readiness call -> non-zero abort` contract cannot be reordered or silently dropped (`T17`);
 - the licensing provider against the runners' real `sppsvc`, `Winmgmt`, `SoftwareLicensingService`, and `RefreshLicenseStatus`, plus a copied-script non-zero `RefreshLicenseStatus.ReturnValue` fixture (`T18`);
 - the C2R service state machine in a fully stubbed test copy: missing service fails immediately, stopped service is started once and succeeds, an unstartable service fails within the bound, and Office 15 accepts a running `OfficeSvc` fallback (`T18c`);
 - Windows Server detection against the real Server 2022 and Server 2025 runner registry, which must establish `winserver=1` (`T19`);
-- activation-core fail-closed behavior: a copied core with forced readiness failure must return non-zero before product processing, Generic Key installation, Ohook installation, or license cleanup (`T20`).
+- activation-core fail-closed behavior: a copied core with forced readiness failure must return non-zero before product processing, Generic Key installation, Ohook installation, or license cleanup (`T20`);
+- the installation-preflight detector state machine against mocked registry, marker-file, application-file, service, architecture, incomplete-install, and unavailable-PowerShell fixtures (`T21`);
+- the real interactive option `[1]` preflight control flow: `NONE` continues, an existing target can return or continue, and detection failure cannot silently enter installation (`T22`, instruments a test bat copy and stops before ODT/network/install).
 
 See:
 
@@ -402,7 +425,7 @@ The runtime workflow intentionally does **not**:
 - execute Ohook;
 - test ARM64 / `SysArm32`.
 
-`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. `T13`, `T16`, `T16b`, `T18`, `T18c`, `T19`, and `T20` use the same copy-instrumentation approach. `T18` directly exercises the bounded provider readiness helper and calls the real `RefreshLicenseStatus`; its negative fixture preserves the real provider query but substitutes a non-zero method result. `T18c` stubs all service/provider behavior. `T20` enters the copied activation core with mutating diagnostics stubbed and readiness forced to fail, proving that no product, key, hook, or cleanup routine is reached. Real Office activation stays outside the CI boundary.
+`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. `T13`, `T16`, `T16b`, `T18`, `T18c`, `T19`, `T20`, `T21`, and `T22` use the same copy-instrumentation approach. `T21` directly drives the combined installation-preflight classifier; `T22` drives the real option `[1]` menus and configuration path with deterministic detector states and a stop before ODT. `T18` directly exercises the bounded provider readiness helper and calls the real `RefreshLicenseStatus`; its negative fixture preserves the real provider query but substitutes a non-zero method result. `T18c` stubs all service/provider behavior. `T20` enters the copied activation core with mutating diagnostics stubbed and readiness forced to fail, proving that no product, key, hook, or cleanup routine is reached. Real Office installation and activation stay outside the CI boundary.
 
 These belong to separate validation stages.
 
@@ -470,7 +493,8 @@ When modifying the Batch script:
 5. preserve `%0` during argument parsing;
 6. do not bypass ODT validation;
 7. keep unattended execution free of `choice`, `pause`, and activation;
-8. add or update Windows Runtime CI assertions for behavior changes.
+8. keep installation preflight read-only and limited to interactive option `[1]`; it must not alter unattended or config-only behavior;
+9. add or update Windows Runtime CI assertions for behavior changes.
 
 Before merging, Windows Runtime CI should pass on both configured Windows runners.
 
