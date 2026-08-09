@@ -164,9 +164,99 @@ echo [3] Exit
 echo ----------------------------------------------------
 choice /c 123 /n /m "Please enter number: "
 set "_choiceExit=!ERRORLEVEL!"
-if "!_choiceExit!"=="1" goto install1
+if "!_choiceExit!"=="1" goto install_preflight
 if "!_choiceExit!"=="2" goto activate_existing
 if "!_choiceExit!"=="3" goto finish
+set "_exitCode=70"
+set "_result=FAILED"
+goto finish
+
+::========================================================================
+::  Read-only installation preflight for interactive option [1] only.
+::  Unattended and config-only modes continue to dispatch directly to
+::  :install1, so this UI never changes their deployment semantics.
+:install_preflight
+echo ----------------------------------------------------
+echo Checking for an existing Microsoft Office installation...
+call :detect_office_install_state
+set "_detectExit=!ERRORLEVEL!"
+if not "!_detectExit!"=="0" set "_officeState=DETECTION_ERROR"
+
+if /i "!_officeState!"=="NONE" (
+    echo No existing Office installation was detected.
+    echo Proceeding with installation.
+    goto install1
+)
+
+if /i "!_officeState!"=="TARGET_INSTALLED" (
+    echo.
+    echo Microsoft 365 Apps for enterprise is already installed.
+    echo.
+    echo Product : O365ProPlusRetail
+    echo Version : !_versionToReport!
+    echo Platform: !_platform!
+    echo.
+    echo [1] Return to main menu
+    echo [2] Continue deployment anyway
+    echo [3] Exit
+    choice /c 123 /n /m "Please enter number: "
+    set "_preflightChoice=!ERRORLEVEL!"
+    if "!_preflightChoice!"=="1" goto install
+    if "!_preflightChoice!"=="2" goto install1
+    if "!_preflightChoice!"=="3" goto finish
+    set "_exitCode=70"
+    set "_result=FAILED"
+    goto finish
+)
+
+if /i "!_officeState!"=="OTHER_OFFICE" (
+    echo.
+    echo An existing Microsoft Office installation was detected,
+    echo but it does not match the target Microsoft 365 Apps for enterprise x64 installation.
+    echo.
+    echo [1] Continue deployment
+    echo [2] Return to main menu
+    echo [3] Exit
+    choice /c 123 /n /m "Please enter number: "
+    set "_preflightChoice=!ERRORLEVEL!"
+    if "!_preflightChoice!"=="1" goto install1
+    if "!_preflightChoice!"=="2" goto install
+    if "!_preflightChoice!"=="3" goto finish
+    set "_exitCode=70"
+    set "_result=FAILED"
+    goto finish
+)
+
+if /i "!_officeState!"=="BROKEN_OFFICE" (
+    echo.
+    echo An incomplete or broken Microsoft Office installation was detected.
+    echo The existing Office installation is not considered healthy.
+    echo.
+    echo [1] Continue deployment/reconfiguration
+    echo [2] Return to main menu
+    echo [3] Exit
+    choice /c 123 /n /m "Please enter number: "
+    set "_preflightChoice=!ERRORLEVEL!"
+    if "!_preflightChoice!"=="1" goto install1
+    if "!_preflightChoice!"=="2" goto install
+    if "!_preflightChoice!"=="3" goto finish
+    set "_exitCode=70"
+    set "_result=FAILED"
+    goto finish
+)
+
+echo.
+echo Office installation detection failed.
+echo Installation has not started.
+echo.
+echo [1] Retry detection
+echo [2] Return to main menu
+echo [3] Exit
+choice /c 123 /n /m "Please enter number: "
+set "_preflightChoice=!ERRORLEVEL!"
+if "!_preflightChoice!"=="1" goto install_preflight
+if "!_preflightChoice!"=="2" goto install
+if "!_preflightChoice!"=="3" goto finish
 set "_exitCode=70"
 set "_result=FAILED"
 goto finish
@@ -278,6 +368,16 @@ echo Checking for an installed Microsoft Office...
 :: core can never disagree on what counts as a supported install. The
 :: helper defines nul/nul6 itself, so no variable setup is needed here.
 call :oh_check_supported_office
+set "_supportedOfficeProbeExit=!ERRORLEVEL!"
+set "_supportedOfficeProbeFailed="
+if not "!_supportedOfficeProbeExit!"=="0" set "_supportedOfficeProbeFailed=1"
+if /i not "!_supportedProbeStatus!"=="SUPPORTED_PROBE_OK" set "_supportedOfficeProbeFailed=1"
+if defined _supportedOfficeProbeFailed (
+    echo Microsoft Office installation detection failed.
+    set "_exitCode=70"
+    set "_result=FAILED"
+    goto finish
+)
 if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined o15msi if not defined o14msi (
     echo No supported Microsoft Office installation was found.
     set "_exitCode=70"
@@ -332,6 +432,15 @@ call :dk_errorcheck
 
 call :oh_setspp
 call :oh_check_supported_office
+set "_supportedOfficeProbeExit=!ERRORLEVEL!"
+if not "!_supportedOfficeProbeExit!"=="0" (
+    echo Microsoft Office detection failed.
+    exit /b 1
+)
+if /i not "!_supportedProbeStatus!"=="SUPPORTED_PROBE_OK" (
+    echo Microsoft Office detection failed.
+    exit /b 1
+)
 :: Defense-in-depth fail-fast: if no supported Office was detected (also
 :: catches a C2R install whose ClickToRun service is gone, via the shared
 :: helper), abort before any per-product activation routine and before the
@@ -537,24 +646,112 @@ set "_configResult=CONFIG_OK"
 if /i "%_mode%"=="unattended" call :log "CONFIG_RESULT=CONFIG_OK"
 exit /b 0
 
-:verify_office_install
-set "_verifyOut=%TEMP%\office-deploy-verification-!RANDOM!.txt"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$keys=@('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Office\ClickToRun\Configuration','Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Office\ClickToRun\Configuration'); $c=$null; foreach($k in $keys){try{$c=Get-ItemProperty -LiteralPath $k -ErrorAction Stop; break}catch{}}; if($null -eq $c){exit 1}; $p=[string]$c.InstallationPath; $ids=[string]$c.ProductReleaseIds; $v=[string]$c.VersionToReport; $a=[string]$c.Platform; 'INSTALLATION_PATH='+$p; 'PRODUCT_RELEASE_IDS='+$ids; 'VERSION_TO_REPORT='+$v; 'PLATFORM='+$a; if([string]::IsNullOrWhiteSpace($p) -or [string]::IsNullOrWhiteSpace($v) -or $ids -notmatch '(^|[,;\s])O365ProPlusRetail([,;\s]|$)' -or $a -ne 'x64'){exit 1}; $root=Join-Path $p 'root\Office16'; if(Test-Path (Join-Path $p 'WINWORD.EXE')){$root=$p}; foreach($exe in @('WINWORD.EXE','EXCEL.EXE','POWERPNT.EXE')){if(-not (Test-Path -LiteralPath (Join-Path $root $exe) -PathType Leaf)){exit 1}}; exit 0" > "%_verifyOut%"
-set "_verifyCommandExit=!ERRORLEVEL!"
-if exist "%_verifyOut%" for /f "usebackq tokens=1,* delims==" %%A in ("%_verifyOut%") do (
+::========================================================================
+::  Read-only exact target probe shared by the interactive installation
+::  preflight and post-install verification. It distinguishes a missing
+::  target, an incomplete target, and a detector failure without changing the
+::  public CLI exit-code contract. Result: _targetProbeState plus metadata.
+:probe_target_office
+set "_targetProbeState=PROBE_ERROR"
+set "_targetProbeReason="
+set "_installationPath="
+set "_productReleaseIds="
+set "_versionToReport="
+set "_platform="
+where powershell >nul 2>nul
+set "_targetPowerShellExit=!ERRORLEVEL!"
+if not "!_targetPowerShellExit!"=="0" exit /b 1
+set "_targetProbeOut=%TEMP%\office-deploy-target-probe-!RANDOM!-!RANDOM!.txt"
+del /q "!_targetProbeOut!" >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { $keys=@('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Office\ClickToRun\Configuration','Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Office\ClickToRun\Configuration'); $c=$null; foreach($k in $keys){if(Test-Path -LiteralPath $k -ErrorAction Stop){$c=Get-ItemProperty -LiteralPath $k -ErrorAction Stop; break}}; if($null -eq $c){'STATE=NO_TARGET'; exit 0}; $p=[string]$c.InstallationPath; $ids=[string]$c.ProductReleaseIds; $v=[string]$c.VersionToReport; $a=[string]$c.Platform; 'INSTALLATION_PATH='+$p; 'PRODUCT_RELEASE_IDS='+$ids; 'VERSION_TO_REPORT='+$v; 'PLATFORM='+$a; if($ids -notmatch '(^|[,;\s])O365ProPlusRetail([,;\s]|$)'){'STATE=NO_TARGET'; exit 0}; if([string]::IsNullOrWhiteSpace($p)){'REASON=INSTALLATION_PATH'; 'STATE=TARGET_INCOMPLETE'; exit 0}; if([string]::IsNullOrWhiteSpace($v)){'REASON=VERSION'; 'STATE=TARGET_INCOMPLETE'; exit 0}; if($a -ne 'x64'){'REASON=PLATFORM'; 'STATE=TARGET_INCOMPLETE'; exit 0}; $root=Join-Path $p 'root\Office16'; if(Test-Path -LiteralPath (Join-Path $p 'WINWORD.EXE') -PathType Leaf){$root=$p}; foreach($exe in @('WINWORD.EXE','EXCEL.EXE','POWERPNT.EXE')){if(-not (Test-Path -LiteralPath (Join-Path $root $exe) -PathType Leaf)){'REASON=CORE_FILES'; 'STATE=TARGET_INCOMPLETE'; exit 0}}; 'STATE=TARGET_INSTALLED'; exit 0 } catch { 'STATE=PROBE_ERROR'; exit 2 }" > "!_targetProbeOut!" 2>nul
+set "_targetProbeCommandExit=!ERRORLEVEL!"
+if exist "!_targetProbeOut!" for /f "usebackq tokens=1,* delims==" %%A in ("!_targetProbeOut!") do (
+    if /i "%%A"=="STATE" set "_targetProbeState=%%B"
+    if /i "%%A"=="REASON" set "_targetProbeReason=%%B"
     if /i "%%A"=="INSTALLATION_PATH" set "_installationPath=%%B"
     if /i "%%A"=="PRODUCT_RELEASE_IDS" set "_productReleaseIds=%%B"
     if /i "%%A"=="VERSION_TO_REPORT" set "_versionToReport=%%B"
     if /i "%%A"=="PLATFORM" set "_platform=%%B"
 )
+del /q "!_targetProbeOut!" >nul 2>nul
+set "_targetProbeOut="
+if not "!_targetProbeCommandExit!"=="0" set "_targetProbeState=PROBE_ERROR"
+if /i "!_targetProbeState!"=="TARGET_INSTALLED" exit /b 0
+if /i "!_targetProbeState!"=="TARGET_INCOMPLETE" exit /b 0
+if /i "!_targetProbeState!"=="NO_TARGET" exit /b 0
+set "_targetProbeState=PROBE_ERROR"
+exit /b 1
+
+::  Combine the exact target probe with the existing MAS-derived supported-
+::  Office detector. This helper only classifies state; it does not add a
+::  third detector and performs no machine mutation.
+:detect_office_install_state
+set "_officeState=DETECTION_ERROR"
+set "_supportedO16C2R="
+set "_supportedO15C2R="
+set "_supportedO16MSI="
+set "_supportedO15MSI="
+set "_supportedO14MSI="
+set "_supportedDetectionError="
+set "_supportedProbeExit="
+set "_supportedProbeResult="
+call :probe_target_office
+set "_targetProbeExit=!ERRORLEVEL!"
+if not "!_targetProbeExit!"=="0" exit /b 1
+if /i "!_targetProbeState!"=="PROBE_ERROR" exit /b 1
+
+call :reset_office_detection_state
+call :oh_check_supported_office
+set "_supportedProbeExit=!ERRORLEVEL!"
+set "_supportedProbeResult=!_supportedProbeStatus!"
+set "_supportedO16C2R=!o16c2r!"
+set "_supportedO15C2R=!o15c2r!"
+set "_supportedO16MSI=!o16msi!"
+set "_supportedO15MSI=!o15msi!"
+set "_supportedO14MSI=!o14msi!"
+set "_supportedDetectionError=!error!"
+call :reset_office_detection_state
+if not "!_supportedProbeExit!"=="0" exit /b 1
+if /i not "!_supportedProbeResult!"=="SUPPORTED_PROBE_OK" exit /b 1
+
+if /i "!_targetProbeState!"=="TARGET_INSTALLED" (
+    if defined _supportedDetectionError (set "_officeState=BROKEN_OFFICE") else if defined _supportedO16C2R (set "_officeState=TARGET_INSTALLED") else set "_officeState=BROKEN_OFFICE"
+    exit /b 0
+)
+if /i "!_targetProbeState!"=="TARGET_INCOMPLETE" (
+    if /i "!_targetProbeReason!"=="PLATFORM" if not defined _supportedDetectionError if defined _supportedO16C2R (
+        set "_officeState=OTHER_OFFICE"
+        exit /b 0
+    )
+    set "_officeState=BROKEN_OFFICE"
+    exit /b 0
+)
+if defined _supportedDetectionError (
+    set "_officeState=BROKEN_OFFICE"
+    exit /b 0
+)
+set "_officeState=NONE"
+if defined _supportedO16C2R set "_officeState=OTHER_OFFICE"
+if defined _supportedO15C2R set "_officeState=OTHER_OFFICE"
+if defined _supportedO16MSI set "_officeState=OTHER_OFFICE"
+if defined _supportedO15MSI set "_officeState=OTHER_OFFICE"
+if defined _supportedO14MSI set "_officeState=OTHER_OFFICE"
+exit /b 0
+
+::  Post-install verification keeps its existing success/failure contract but
+::  delegates all target-product checks to the shared exact probe above.
+:verify_office_install
+call :probe_target_office
+set "_verifyProbeExit=!ERRORLEVEL!"
 if /i "%_mode%"=="unattended" (
     call :log "INSTALLATION_PATH=!_installationPath!"
     call :log "PRODUCT_RELEASE_IDS=!_productReleaseIds!"
     call :log "VERSION_TO_REPORT=!_versionToReport!"
     call :log "PLATFORM=!_platform!"
 )
-del /q "%_verifyOut%" >nul 2>nul
-exit /b %_verifyCommandExit%
+if not "!_verifyProbeExit!"=="0" exit /b 1
+if /i not "!_targetProbeState!"=="TARGET_INSTALLED" exit /b 1
+exit /b 0
 
 ::========================================================================
 ::  Ensure %_setup% exists and has passed ODT validation.
@@ -691,6 +888,25 @@ exit /b
 
 ::========================================================================================================================================
 
+::  Clear the global variables used by the shared supported-Office detector.
+::  Installation preflight calls this before and after detection so a broken
+::  C2R `error=1` or detected product flag cannot leak into deployment or the
+::  later activation core.
+:reset_office_detection_state
+set "o16c2r="
+set "o15c2r="
+set "o16msi="
+set "o15msi="
+set "o14msi="
+set "o16c2r_reg="
+set "o15c2r_reg="
+set "o16msi_reg="
+set "o15msi_reg="
+set "o14msi_reg="
+set "_supportedProbeStatus="
+set "error="
+exit /b 0
+
 ::  Supported-Office detector shared by :activate_existing (option [2]) and
 ::  :oh_activate_core. Calls :oh_getpath (registry + marker file), then adds
 ::  the MAS upstream C2R validity check: a ClickToRun install whose service
@@ -699,31 +915,62 @@ exit /b
 ::  Ohook_Activation_AIO.cmd (sc query ClickToRunSvc / OfficeSvc; 1060 means
 ::  the service does not exist). Sets `error=1` when a C2R candidate is
 ::  judged broken (service missing) -- even if another valid Office (e.g.
-::  MSI) remains on the machine. Callers reset `error` BEFORE calling this
-::  helper, matching upstream ordering, so the error survives to the result.
+::  MSI) remains on the machine. Separately exposes _supportedProbeStatus as
+::  SUPPORTED_PROBE_OK or SUPPORTED_PROBE_ERROR. Executable/registry/SCM
+::  health failures and unexpected candidate-service query results are
+::  operational errors, not evidence that Office is absent. Operational
+::  failure clears all detected flags and returns non-zero, keeping every
+::  caller fail-closed. Callers reset `error` BEFORE calling this helper,
+::  matching upstream ordering, so broken/install errors survive the result.
 ::  Self-contained: defines %nul% and %nul6% itself, so callers need no
 ::  variable setup (:oh_getpath reads %nul6%; the service checks read %nul%).
 :oh_check_supported_office
+set "_supportedProbeStatus=SUPPORTED_PROBE_ERROR"
 set "nul=>nul 2>&1"
 set "nul6=2^>nul"
+where reg.exe >nul 2>nul
+if not "!ERRORLEVEL!"=="0" goto oh_supported_probe_error
+where sc.exe >nul 2>nul
+if not "!ERRORLEVEL!"=="0" goto oh_supported_probe_error
+reg query "HKLM\SOFTWARE" %nul%
+if not "!ERRORLEVEL!"=="0" goto oh_supported_probe_error
+sc query EventLog %nul%
+if not "!ERRORLEVEL!"=="0" goto oh_supported_probe_error
 call :oh_getpath
+if defined o16c2r if not defined o16c2r_reg goto oh_supported_probe_error
+if defined o15c2r if not defined o15c2r_reg goto oh_supported_probe_error
+if defined o16msi if not defined o16msi_reg goto oh_supported_probe_error
+if defined o15msi if not defined o15msi_reg goto oh_supported_probe_error
+if defined o14msi if not defined o14msi_reg goto oh_supported_probe_error
 sc query ClickToRunSvc %nul%
-set _ohSvcErr1=%errorlevel%
+set "_ohSvcErr1=!ERRORLEVEL!"
 sc query OfficeSvc %nul%
-set _ohSvcErr2=%errorlevel%
-if defined o16c2r if "%_ohSvcErr1%"=="1060" (
+set "_ohSvcErr2=!ERRORLEVEL!"
+if defined o16c2r if not "!_ohSvcErr1!"=="0" if not "!_ohSvcErr1!"=="1060" goto oh_supported_probe_error
+if defined o15c2r if not "!_ohSvcErr1!"=="0" if not "!_ohSvcErr1!"=="1060" goto oh_supported_probe_error
+if defined o15c2r if not "!_ohSvcErr2!"=="0" if not "!_ohSvcErr2!"=="1060" goto oh_supported_probe_error
+if defined o16c2r if "!_ohSvcErr1!"=="1060" (
     echo Checking ClickToRun Service             [Not found, Office 16.0 files found]
     set "o16c2r="
     set "error=1"
 )
-if defined o15c2r if "%_ohSvcErr1%"=="1060" if "%_ohSvcErr2%"=="1060" (
+if defined o15c2r if "!_ohSvcErr1!"=="1060" if "!_ohSvcErr2!"=="1060" (
     echo Checking ClickToRun Service             [Not found, Office 15.0 files found]
     set "o15c2r="
     set "error=1"
 )
 set "_ohSvcErr1="
 set "_ohSvcErr2="
-exit /b
+set "_supportedProbeStatus=SUPPORTED_PROBE_OK"
+exit /b 0
+
+:oh_supported_probe_error
+set "_ohSvcErr1="
+set "_ohSvcErr2="
+call :reset_office_detection_state
+set "_supportedProbeStatus=SUPPORTED_PROBE_ERROR"
+set "error=1"
+exit /b 1
 
 ::  Establish the MAS Windows Server flag used by :oh_process.
 :oh_detect_windows_server

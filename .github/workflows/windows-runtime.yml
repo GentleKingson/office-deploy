@@ -5,10 +5,10 @@ name: Windows Runtime CI
 #   - no ODT download
 #   - no Office installation
 #   - no activation
-# It deliberately exercises only the unattended control-flow paths of
-# officeDeploy.bat. T9 / T10 are terminated deterministically inside
-# :ensure_odt before any network call by using the script's own
-# stale-temporary-cleanup branch as a fault-injection point.
+# Interactive tests use Exit-only paths or instrument a copied bat to stop
+# before ODT/activation. T9 / T10 are terminated deterministically inside
+# :ensure_odt before any network call by using the script's own stale-
+# temporary-cleanup branch as a fault-injection point.
 # T12 is the only test that enters the interactive option [2] path. It
 # instruments a COPIED bat at runtime (there is NO test seam in the
 # production script) so the Ohook call becomes unreachable, then drives the
@@ -20,6 +20,9 @@ name: Windows Runtime CI
 # production ordering, T18/T18c exercise provider and C2R readiness semantics,
 # and T20 drives the copied activation core to prove readiness failure is
 # fail-closed before any product/key/hook/cleanup path.
+# T21 directly exercises the read-only installation-preflight classifier;
+# T22 drives the real interactive option [1] menus with copied-script detector
+# fixtures and stops before ODT/network/install.
 # T14 / T15 / T15b guard the line-ending contract of the distributed artifact.
 # T14 extracts the raw Git blob of officeDeploy.bat (exactly what an end user
 # downloads) and asserts, byte-for-byte, that every line ending is CRLF.
@@ -788,12 +791,12 @@ jobs:
       # and could not catch the bug where the interactive [1] branch inherits
       # choice's ERRORLEVEL (=1) into :write_config, which then misread the
       # inherited value as CONFIG_WRITE_FAILED. T16 pipes "1" through the REAL
-      # interactive menu so the exact failing control flow runs end to end:
-      # menu -> choice /c 123 -> ERRORLEVEL=1 -> goto install1 -> call
-      # :write_config. The COPY is instrumented with a single `goto finish`
-      # replacing the unique DOWNLOAD stage marker, so a successful config run
-      # stops before any ensure_odt / network / install call. There is NO test
-      # seam in the production script (CI instruments a COPY only).
+      # interactive menu so the current control flow runs end to end: menu ->
+      # choice /c 123 -> installation preflight (mocked to NONE in the COPY)
+      # -> install1 -> :write_config. The COPY is also instrumented with a
+      # `goto finish` replacing the unique DOWNLOAD stage marker, so a
+      # successful config run stops before ensure_odt / network / install.
+      # There is NO test seam in the production script.
       # ----------------------------------------------------------------------
       - name: T16 Interactive option [1] config generation
         shell: cmd
@@ -806,16 +809,16 @@ jobs:
           set "TEMP=%ROOT%\interactive1\temp"
           set "TMP=%ROOT%\interactive1\temp"
 
-          :: Instrument the COPY (never the checked-in bat): replace the unique
-          :: DOWNLOAD stage marker with `goto finish`, so a successful config
-          :: run stops before ensure_odt. [char]34 stands in for the double
-          :: quotes so the cmd -Command "..." layer never sees a literal ".
-          :: .Contains / .Replace on the raw text preserve CRLF and ASCII.
-          powershell -NoProfile -Command "$f='%ROOT%\interactive1\officeDeploy.bat'; $q=[char]34; $old='set '+$q+'_stage=DOWNLOAD'+$q; $t=[IO.File]::ReadAllText($f); if(-not $t.Contains($old)){exit 1}; $t=$t.Replace($old,'goto finish'); [IO.File]::WriteAllText($f,$t); exit 0"
-          if !ERRORLEVEL! NEQ 0 ( echo [T16] FAIL: DOWNLOAD anchor not found & exit /b 1 )
+          :: Instrument the COPY (never the checked-in bat): stub only the
+          :: read-only detector orchestration to return NONE, then replace the
+          :: unique DOWNLOAD stage marker with `goto finish`. This makes the
+          :: case deterministic even if a runner image later contains Office.
+          powershell -NoProfile -Command "$f='%ROOT%\interactive1\officeDeploy.bat'; $q=[char]34; $nl=[char]13+[char]10; $download='set '+$q+'_stage=DOWNLOAD'+$q; $detect='call :detect_office_install_state'; $t=[IO.File]::ReadAllText($f); if(-not $t.Contains($download) -or -not $t.Contains($detect)){exit 1}; $t=$t.Replace($detect,'call :t16_detect_none').Replace($download,'goto finish'); $t=$t+$nl+':t16_detect_none'+$nl+'set _officeState=NONE'+$nl+'exit /b 0'+$nl; [IO.File]::WriteAllText($f,$t); exit 0"
+          if !ERRORLEVEL! NEQ 0 ( echo [T16] FAIL: instrumentation anchor not found & exit /b 1 )
 
           :: Static guard: production bat must carry NO probe / test seam.
           findstr /c:"_T16B_PROBE" "officeDeploy.bat" >nul && ( echo [T16] FAIL: test seam present in production bat & exit /b 1 )
+          findstr /c:"t16_detect_none" "officeDeploy.bat" >nul && ( echo [T16] FAIL: detector stub present in production bat & exit /b 1 )
 
           :: Pipe "1" through the interactive menu -> choice reads 1 -> [1] ->
           :: config generation. The trailing newline feeds the :finish pause.
@@ -833,6 +836,7 @@ jobs:
           if !SZ! LEQ 0 ( echo [T16] FAIL: Configuration.xml empty & exit /b 1 )
 
           :: Positive: the config-generation banner actually ran.
+          findstr /c:"No existing Office installation was detected." "%ROOT%\interactive1\run.out" >nul || ( echo [T16] FAIL: NONE preflight missing & type "%ROOT%\interactive1\run.out" & exit /b 1 )
           findstr /c:"Generating configuration file" "%ROOT%\interactive1\run.out" >nul || ( echo [T16] FAIL: config banner missing & type "%ROOT%\interactive1\run.out" & exit /b 1 )
 
           :: Negative: the bug signature MUST be absent.
@@ -935,6 +939,9 @@ jobs:
             'call :dk_errorcheck',
             'call :oh_setspp',
             'call :oh_check_supported_office',
+            'set "_supportedOfficeProbeExit=!ERRORLEVEL!"',
+            'if not "!_supportedOfficeProbeExit!"=="0"',
+            'if /i not "!_supportedProbeStatus!"=="SUPPORTED_PROBE_OK"',
             'call :oh_detect_windows_server',
             'call :oh_wait_licensing_ready'
           )
@@ -1238,7 +1245,7 @@ jobs:
 
           $text = $text.Replace('call :dk_sppissue', 'rem T20 dk_sppissue stub')
           $text = $text.Replace('call :dk_errorcheck', 'rem T20 dk_errorcheck stub')
-          $text = $text.Replace('call :oh_check_supported_office', 'set "o16c2r=1"')
+          $text = $text.Replace('call :oh_check_supported_office', "set `"o16c2r=1`"`r`nset `"_supportedProbeStatus=SUPPORTED_PROBE_OK`"`r`ncmd /d /c exit 0")
           $text = $text.Replace('call :oh_wait_licensing_ready', 'call :t20_readiness_fail')
 
           $dispatcher = @'
@@ -1296,6 +1303,290 @@ jobs:
           }
           Write-Host "[T20] PASS core-readiness-failure rc=$rc abort-before-product-key-hook-cleanup"
           exit 0
+
+      # ----------------------------------------------------------------------
+      # T21: installation-preflight detector state machine. A copied bat gets
+      # a dispatcher that calls only :detect_office_install_state. Registry,
+      # marker-file, application-file, service, and detector-operational-error
+      # fixtures are local to the runner. No menu, ODT, install, or activation
+      # path runs.
+      # ----------------------------------------------------------------------
+      - name: T21 Installation preflight detector
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\install-preflight-detect" >nul 2>nul
+          mkdir "%ROOT%\install-preflight-detect\temp" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\install-preflight-detect\officeDeploy.bat" >nul
+          set "TEMP=%ROOT%\install-preflight-detect\temp"
+          set "TMP=%ROOT%\install-preflight-detect\temp"
+
+          :: Inject a top-level dispatcher into the COPY. Literal ! characters
+          :: are assembled inside PowerShell so this outer delayed-expansion
+          :: block cannot consume the probe's runtime variable references.
+          powershell -NoProfile -Command "$f='%ROOT%\install-preflight-detect\officeDeploy.bat'; $nl=[char]13+[char]10; $x=[char]33; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $d='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if not defined _T21_PROBE goto :t21_done'+$nl+'call :detect_office_install_state'+$nl+'set _t21rc='+$x+'errorlevel'+$x+$nl+'echo PROBE_OFFICE_STATE='+$x+'_officeState'+$x+$nl+'echo PROBE_TARGET_STATE='+$x+'_targetProbeState'+$x+$nl+'echo PROBE_TARGET_REASON='+$x+'_targetProbeReason'+$x+$nl+'echo PROBE_SUPPORTED_STATUS='+$x+'_supportedProbeResult'+$x+$nl+'exit /b '+$x+'_t21rc'+$x+$nl+':t21_done'+$nl+'@set masver=3.10'; if(-not $t.StartsWith($old)){exit 1}; $t=$d+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
+          if !ERRORLEVEL! NEQ 0 ( echo [T21] FAIL: dispatcher injection failed & exit /b 1 )
+          findstr /c:"_T21_PROBE" "officeDeploy.bat" >nul && ( echo [T21] FAIL: test seam present in production bat & exit /b 1 )
+
+          set "CLEAN_KEYS=HKLM\SOFTWARE\Microsoft\Office\ClickToRun HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\ClickToRun HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\15.0\ClickToRun HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\15.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\15.0\Common\InstallRoot HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\14.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\14.0\Common\InstallRoot"
+          for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
+          for %%D in (T21Target T21MSI T21Broken) do rmdir /s /q "C:\%%D" >nul 2>nul
+          sc delete ClickToRunSvc >nul 2>nul
+          sc delete OfficeSvc >nul 2>nul
+          set "_T21_PROBE=1"
+
+          :: ---- T21a: no Office -> NONE ----
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\a.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T21a] FAIL: detector exit !RC! & type "%ROOT%\install-preflight-detect\a.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=NONE" "%ROOT%\install-preflight-detect\a.out" >nul || ( echo [T21a] FAIL: expected NONE & type "%ROOT%\install-preflight-detect\a.out" & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_STATE=NO_TARGET" "%ROOT%\install-preflight-detect\a.out" >nul || ( echo [T21a] FAIL: expected NO_TARGET & type "%ROOT%\install-preflight-detect\a.out" & exit /b 1 )
+          findstr /x /c:"PROBE_SUPPORTED_STATUS=SUPPORTED_PROBE_OK" "%ROOT%\install-preflight-detect\a.out" >nul || ( echo [T21a] FAIL: expected successful broad probe & exit /b 1 )
+          echo [T21a] PASS no-office=NONE
+
+          :: Shared healthy C2R fixture for T21b/c/d.
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f /v InstallPath /t REG_SZ /d "C:\T21Target" >nul || ( echo [T21] FAIL: C2R InstallPath fixture & exit /b 1 )
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v InstallationPath /t REG_SZ /d "C:\T21Target" >nul || exit /b 1
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v ProductReleaseIds /t REG_SZ /d "O365ProPlusRetail" >nul || exit /b 1
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v VersionToReport /t REG_SZ /d "16.0.19029.20184" >nul || exit /b 1
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v Platform /t REG_SZ /d "x64" >nul || exit /b 1
+          mkdir "C:\T21Target\root\Office16" >nul 2>nul
+          mkdir "C:\T21Target\root\Licenses16" >nul 2>nul
+          for %%F in (WINWORD.EXE EXCEL.EXE POWERPNT.EXE) do echo dummy-app>"C:\T21Target\root\Office16\%%F"
+          echo dummy-license>"C:\T21Target\root\Licenses16\ProPlusDummy.xrm-ms"
+          sc create ClickToRunSvc binPath= "%SystemRoot%\system32\cmd.exe" >nul || ( echo [T21] FAIL: sc create ClickToRunSvc & exit /b 1 )
+
+          :: ---- T21b: complete target x64 -> TARGET_INSTALLED ----
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\b.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T21b] FAIL: detector exit !RC! & type "%ROOT%\install-preflight-detect\b.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=TARGET_INSTALLED" "%ROOT%\install-preflight-detect\b.out" >nul || ( echo [T21b] FAIL: expected TARGET_INSTALLED & type "%ROOT%\install-preflight-detect\b.out" & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_STATE=TARGET_INSTALLED" "%ROOT%\install-preflight-detect\b.out" >nul || ( echo [T21b] FAIL: exact target not installed & exit /b 1 )
+          echo [T21b] PASS target-x64-complete=TARGET_INSTALLED
+
+          :: ---- T21c: target product x86 -> OTHER_OFFICE, never target ----
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v Platform /t REG_SZ /d "x86" >nul || exit /b 1
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\c.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T21c] FAIL: detector exit !RC! & type "%ROOT%\install-preflight-detect\c.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=OTHER_OFFICE" "%ROOT%\install-preflight-detect\c.out" >nul || ( echo [T21c] FAIL: expected OTHER_OFFICE & type "%ROOT%\install-preflight-detect\c.out" & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_STATE=TARGET_INCOMPLETE" "%ROOT%\install-preflight-detect\c.out" >nul || ( echo [T21c] FAIL: expected TARGET_INCOMPLETE & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_REASON=PLATFORM" "%ROOT%\install-preflight-detect\c.out" >nul || ( echo [T21c] FAIL: platform reason missing & exit /b 1 )
+          echo [T21c] PASS target-x86=OTHER_OFFICE
+
+          :: ---- T21d: target x64 with WINWORD missing -> BROKEN_OFFICE ----
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v Platform /t REG_SZ /d "x64" >nul || exit /b 1
+          del /q "C:\T21Target\root\Office16\WINWORD.EXE" >nul 2>nul
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\d.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T21d] FAIL: detector exit !RC! & type "%ROOT%\install-preflight-detect\d.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=BROKEN_OFFICE" "%ROOT%\install-preflight-detect\d.out" >nul || ( echo [T21d] FAIL: expected BROKEN_OFFICE & type "%ROOT%\install-preflight-detect\d.out" & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_REASON=CORE_FILES" "%ROOT%\install-preflight-detect\d.out" >nul || ( echo [T21d] FAIL: core-files reason missing & exit /b 1 )
+          echo [T21d] PASS target-missing-app=BROKEN_OFFICE
+
+          :: ---- T21e: supported Office 16 MSI -> OTHER_OFFICE ----
+          reg delete "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f >nul 2>nul
+          reg add "HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot" /f /v Path /t REG_SZ /d "C:\T21MSI" >nul || exit /b 1
+          mkdir "C:\T21MSI" >nul 2>nul
+          echo dummy-picker>"C:\T21MSI\DummyPicker.dll"
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\e.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T21e] FAIL: detector exit !RC! & type "%ROOT%\install-preflight-detect\e.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=OTHER_OFFICE" "%ROOT%\install-preflight-detect\e.out" >nul || ( echo [T21e] FAIL: expected OTHER_OFFICE & type "%ROOT%\install-preflight-detect\e.out" & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_STATE=NO_TARGET" "%ROOT%\install-preflight-detect\e.out" >nul || ( echo [T21e] FAIL: expected NO_TARGET & exit /b 1 )
+          echo [T21e] PASS office16-msi=OTHER_OFFICE
+
+          :: ---- T21f: C2R marker but service missing -> BROKEN_OFFICE ----
+          reg delete "HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot" /f >nul 2>nul
+          sc delete ClickToRunSvc >nul 2>nul
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f /v InstallPath /t REG_SZ /d "C:\T21Broken" >nul || exit /b 1
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v InstallationPath /t REG_SZ /d "C:\T21Broken" >nul || exit /b 1
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v ProductReleaseIds /t REG_SZ /d "VisioProRetail" >nul || exit /b 1
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v VersionToReport /t REG_SZ /d "16.0.19029.20184" >nul || exit /b 1
+          reg add "HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" /f /v Platform /t REG_SZ /d "x64" >nul || exit /b 1
+          mkdir "C:\T21Broken\root\Licenses16" >nul 2>nul
+          echo dummy-license>"C:\T21Broken\root\Licenses16\ProPlusDummy.xrm-ms"
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\f.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T21f] FAIL: detector exit !RC! & type "%ROOT%\install-preflight-detect\f.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=BROKEN_OFFICE" "%ROOT%\install-preflight-detect\f.out" >nul || ( echo [T21f] FAIL: expected BROKEN_OFFICE & type "%ROOT%\install-preflight-detect\f.out" & exit /b 1 )
+          findstr /c:"Not found, Office 16.0 files found" "%ROOT%\install-preflight-detect\f.out" >nul || ( echo [T21f] FAIL: broken-service evidence missing & exit /b 1 )
+          findstr /x /c:"PROBE_SUPPORTED_STATUS=SUPPORTED_PROBE_OK" "%ROOT%\install-preflight-detect\f.out" >nul || ( echo [T21f] FAIL: service 1060 misclassified as operational error & exit /b 1 )
+          echo [T21f] PASS missing-c2r-service=BROKEN_OFFICE
+
+          :: ---- T21g: unavailable PowerShell -> DETECTION_ERROR ----
+          reg delete "HKLM\SOFTWARE\Microsoft\Office\ClickToRun" /f >nul 2>nul
+          set "OLDPATH=!PATH!"
+          set "PATH=C:\T21NoPath"
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\g.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          set "PATH=!OLDPATH!"
+          if "!RC!"=="0" ( echo [T21g] FAIL: detector unexpectedly succeeded & type "%ROOT%\install-preflight-detect\g.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=DETECTION_ERROR" "%ROOT%\install-preflight-detect\g.out" >nul || ( echo [T21g] FAIL: expected DETECTION_ERROR & type "%ROOT%\install-preflight-detect\g.out" & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_STATE=PROBE_ERROR" "%ROOT%\install-preflight-detect\g.out" >nul || ( echo [T21g] FAIL: expected PROBE_ERROR & exit /b 1 )
+          echo [T21g] PASS powershell-unavailable=DETECTION_ERROR
+
+          :: ---- T21h: broad detector operational failure -> DETECTION_ERROR ----
+          :: Instrument only the COPY's explicit broad-registry health probe.
+          :: The exact PowerShell target probe still runs normally and returns
+          :: NO_TARGET; the failing broad channel must prevent NONE/install.
+          powershell -NoProfile -Command "$f='%ROOT%\install-preflight-detect\officeDeploy.bat'; $q=[char]34; $p=[char]37; $old='reg query '+$q+'HKLM\SOFTWARE'+$q+' '+$p+'nul'+$p; $t=[IO.File]::ReadAllText($f); if(-not $t.Contains($old)){exit 1}; $t=$t.Replace($old,'cmd /d /c exit 9'); [IO.File]::WriteAllText($f,$t); exit 0"
+          if !ERRORLEVEL! NEQ 0 ( echo [T21h] FAIL: broad-probe anchor not found & exit /b 1 )
+          call "%ROOT%\install-preflight-detect\officeDeploy.bat" > "%ROOT%\install-preflight-detect\h.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if "!RC!"=="0" ( echo [T21h] FAIL: detector unexpectedly succeeded & type "%ROOT%\install-preflight-detect\h.out" & exit /b 1 )
+          findstr /x /c:"PROBE_OFFICE_STATE=DETECTION_ERROR" "%ROOT%\install-preflight-detect\h.out" >nul || ( echo [T21h] FAIL: expected DETECTION_ERROR & type "%ROOT%\install-preflight-detect\h.out" & exit /b 1 )
+          findstr /x /c:"PROBE_TARGET_STATE=NO_TARGET" "%ROOT%\install-preflight-detect\h.out" >nul || ( echo [T21h] FAIL: expected exact NO_TARGET & exit /b 1 )
+          findstr /x /c:"PROBE_SUPPORTED_STATUS=SUPPORTED_PROBE_ERROR" "%ROOT%\install-preflight-detect\h.out" >nul || ( echo [T21h] FAIL: broad operational status missing & type "%ROOT%\install-preflight-detect\h.out" & exit /b 1 )
+          echo [T21h] PASS broad-operational-failure=DETECTION_ERROR
+
+          set "_T21_PROBE="
+          for %%K in (!CLEAN_KEYS!) do reg delete "%%K" /f >nul 2>nul
+          sc delete ClickToRunSvc >nul 2>nul
+          sc delete OfficeSvc >nul 2>nul
+          echo [T21] PASS detector-state-machine operational-fail-closed no-odt no-install no-activation
+          exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T22: real interactive option [1] control flow. Only the detector
+      # orchestration is stubbed in a copied bat; the real menu, preflight UI,
+      # install dispatch, and :write_config execute. DOWNLOAD is replaced with
+      # `goto finish`, guaranteeing no network, ODT, Office, or activation.
+      # ----------------------------------------------------------------------
+      - name: T22 Interactive option [1] preflight control flow
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          set "ROOT=%RUNNER_TEMP%\office-deploy-tests"
+          mkdir "%ROOT%\install-preflight-flow" >nul 2>nul
+          mkdir "%ROOT%\install-preflight-flow\base" >nul 2>nul
+          copy /y "officeDeploy.bat" "%ROOT%\install-preflight-flow\base\officeDeploy.bat" >nul
+
+          :: Instrument the COPY with a deterministic state-only classifier
+          :: stub and a DOWNLOAD stop. All interaction and config generation
+          :: remain production code. Assemble literal ! inside PowerShell.
+          powershell -NoProfile -Command "$f='%ROOT%\install-preflight-flow\base\officeDeploy.bat'; $nl=[char]13+[char]10; $x=[char]33; $q=[char]34; $t=[IO.File]::ReadAllText($f); $detect='call :detect_office_install_state'; $download='set '+$q+'_stage=DOWNLOAD'+$q; if(-not $t.Contains($detect) -or -not $t.Contains($download)){exit 1}; $t=$t.Replace($detect,'call :t22_detect_fixture').Replace($download,'goto finish'); $s=':t22_detect_fixture'+$nl+'set '+$q+'_officeState='+$x+'_T22_STATE'+$x+$q+$nl+'set '+$q+'_versionToReport=16.0.19029.20184'+$q+$nl+'set '+$q+'_platform=x64'+$q+$nl+'if /i '+$q+$x+'_officeState'+$x+$q+'=='+$q+'DETECTION_ERROR'+$q+' exit /b 1'+$nl+'exit /b 0'+$nl; [IO.File]::WriteAllText($f,$t+$nl+$s); exit 0"
+          if !ERRORLEVEL! NEQ 0 ( echo [T22] FAIL: instrumentation failed & exit /b 1 )
+          findstr /c:"_T22_STATE" "officeDeploy.bat" >nul && ( echo [T22] FAIL: test seam present in production bat & exit /b 1 )
+
+          for %%C in (none target-return target-continue detection-error other-return other-continue broken-return broken-continue) do (
+            mkdir "%ROOT%\install-preflight-flow\%%C" >nul 2>nul
+            mkdir "%ROOT%\install-preflight-flow\%%C\temp" >nul 2>nul
+            copy /y "%ROOT%\install-preflight-flow\base\officeDeploy.bat" "%ROOT%\install-preflight-flow\%%C\officeDeploy.bat" >nul
+          )
+
+          :: ---- T22a: NONE automatically continues into config generation ----
+          set "TEMP=%ROOT%\install-preflight-flow\none\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=NONE"
+          echo 1| call "%ROOT%\install-preflight-flow\none\officeDeploy.bat" > "%ROOT%\install-preflight-flow\none\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22a] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\none\run.out" & exit /b 1 )
+          if not exist "%ROOT%\install-preflight-flow\none\Configuration.xml" ( echo [T22a] FAIL: Configuration.xml missing & type "%ROOT%\install-preflight-flow\none\run.out" & exit /b 1 )
+          findstr /c:"No existing Office installation was detected." "%ROOT%\install-preflight-flow\none\run.out" >nul || ( echo [T22a] FAIL: NONE message missing & exit /b 1 )
+          echo [T22a] PASS none-auto-continues-to-config
+
+          :: ---- T22b: TARGET_INSTALLED + Return never enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\target-return\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=TARGET_INSTALLED"
+          :: 1 = main Install, 1 = Return, 3 = main Exit; CR/LF feeds pause.
+          echo 113| call "%ROOT%\install-preflight-flow\target-return\officeDeploy.bat" > "%ROOT%\install-preflight-flow\target-return\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22b] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\target-return\run.out" & exit /b 1 )
+          if exist "%ROOT%\install-preflight-flow\target-return\Configuration.xml" ( echo [T22b] FAIL: Configuration.xml created after Return & exit /b 1 )
+          findstr /c:"Microsoft 365 Apps for enterprise is already installed." "%ROOT%\install-preflight-flow\target-return\run.out" >nul || ( echo [T22b] FAIL: target message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\target-return\run.out" >nul && ( echo [T22b] FAIL: install1 reached after Return & exit /b 1 )
+          echo [T22b] PASS target-return=no-config
+
+          :: ---- T22c: TARGET_INSTALLED + Continue enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\target-continue\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=TARGET_INSTALLED"
+          :: 1 = main Install, 2 = Continue; CR/LF feeds pause after config.
+          echo 12| call "%ROOT%\install-preflight-flow\target-continue\officeDeploy.bat" > "%ROOT%\install-preflight-flow\target-continue\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22c] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\target-continue\run.out" & exit /b 1 )
+          if not exist "%ROOT%\install-preflight-flow\target-continue\Configuration.xml" ( echo [T22c] FAIL: Configuration.xml missing & type "%ROOT%\install-preflight-flow\target-continue\run.out" & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\target-continue\run.out" >nul || ( echo [T22c] FAIL: install1 not reached & exit /b 1 )
+          echo [T22c] PASS target-continue=config-created
+
+          :: ---- T22d: any exact/broad DETECTION_ERROR never enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\detection-error\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=DETECTION_ERROR"
+          :: 1 = main Install, 3 = Exit from the detection-error menu.
+          echo 13| call "%ROOT%\install-preflight-flow\detection-error\officeDeploy.bat" > "%ROOT%\install-preflight-flow\detection-error\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22d] FAIL: expected user-exit 0, got !RC! & type "%ROOT%\install-preflight-flow\detection-error\run.out" & exit /b 1 )
+          if exist "%ROOT%\install-preflight-flow\detection-error\Configuration.xml" ( echo [T22d] FAIL: Configuration.xml created after detection failure & exit /b 1 )
+          findstr /c:"Office installation detection failed." "%ROOT%\install-preflight-flow\detection-error\run.out" >nul || ( echo [T22d] FAIL: failure message missing & exit /b 1 )
+          findstr /c:"Installation has not started." "%ROOT%\install-preflight-flow\detection-error\run.out" >nul || ( echo [T22d] FAIL: fail-closed message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\detection-error\run.out" >nul && ( echo [T22d] FAIL: silently entered install1 & exit /b 1 )
+          echo [T22d] PASS detection-error=fail-closed-no-config
+
+          :: ---- T22e: OTHER_OFFICE + Return never enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\other-return\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=OTHER_OFFICE"
+          :: 1 = main Install, 2 = Return, 3 = main Exit; CR/LF feeds pause.
+          echo 123| call "%ROOT%\install-preflight-flow\other-return\officeDeploy.bat" > "%ROOT%\install-preflight-flow\other-return\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22e] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\other-return\run.out" & exit /b 1 )
+          if exist "%ROOT%\install-preflight-flow\other-return\Configuration.xml" ( echo [T22e] FAIL: Configuration.xml created after Return & exit /b 1 )
+          findstr /c:"An existing Microsoft Office installation was detected," "%ROOT%\install-preflight-flow\other-return\run.out" >nul || ( echo [T22e] FAIL: OTHER_OFFICE message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\other-return\run.out" >nul && ( echo [T22e] FAIL: install1 reached after Return & exit /b 1 )
+          echo [T22e] PASS other-office-return=no-config
+
+          :: ---- T22f: OTHER_OFFICE + Continue enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\other-continue\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=OTHER_OFFICE"
+          :: 1 = main Install, 1 = Continue; CR/LF feeds pause after config.
+          echo 11| call "%ROOT%\install-preflight-flow\other-continue\officeDeploy.bat" > "%ROOT%\install-preflight-flow\other-continue\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22f] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\other-continue\run.out" & exit /b 1 )
+          if not exist "%ROOT%\install-preflight-flow\other-continue\Configuration.xml" ( echo [T22f] FAIL: Configuration.xml missing & type "%ROOT%\install-preflight-flow\other-continue\run.out" & exit /b 1 )
+          findstr /c:"An existing Microsoft Office installation was detected," "%ROOT%\install-preflight-flow\other-continue\run.out" >nul || ( echo [T22f] FAIL: OTHER_OFFICE message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\other-continue\run.out" >nul || ( echo [T22f] FAIL: install1 not reached & exit /b 1 )
+          echo [T22f] PASS other-office-continue=config-created
+
+          :: ---- T22g: BROKEN_OFFICE + Return never enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\broken-return\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=BROKEN_OFFICE"
+          :: 1 = main Install, 2 = Return, 3 = main Exit; CR/LF feeds pause.
+          echo 123| call "%ROOT%\install-preflight-flow\broken-return\officeDeploy.bat" > "%ROOT%\install-preflight-flow\broken-return\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22g] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\broken-return\run.out" & exit /b 1 )
+          if exist "%ROOT%\install-preflight-flow\broken-return\Configuration.xml" ( echo [T22g] FAIL: Configuration.xml created after Return & exit /b 1 )
+          findstr /c:"An incomplete or broken Microsoft Office installation was detected." "%ROOT%\install-preflight-flow\broken-return\run.out" >nul || ( echo [T22g] FAIL: BROKEN_OFFICE message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\broken-return\run.out" >nul && ( echo [T22g] FAIL: install1 reached after Return & exit /b 1 )
+          echo [T22g] PASS broken-office-return=no-config
+
+          :: ---- T22h: BROKEN_OFFICE + Continue enters install1 ----
+          set "TEMP=%ROOT%\install-preflight-flow\broken-continue\temp"
+          set "TMP=!TEMP!"
+          set "_T22_STATE=BROKEN_OFFICE"
+          :: 1 = main Install, 1 = Continue; CR/LF feeds pause after config.
+          echo 11| call "%ROOT%\install-preflight-flow\broken-continue\officeDeploy.bat" > "%ROOT%\install-preflight-flow\broken-continue\run.out" 2>&1
+          set "RC=!ERRORLEVEL!"
+          if not "!RC!"=="0" ( echo [T22h] FAIL: expected exit 0, got !RC! & type "%ROOT%\install-preflight-flow\broken-continue\run.out" & exit /b 1 )
+          if not exist "%ROOT%\install-preflight-flow\broken-continue\Configuration.xml" ( echo [T22h] FAIL: Configuration.xml missing & type "%ROOT%\install-preflight-flow\broken-continue\run.out" & exit /b 1 )
+          findstr /c:"An incomplete or broken Microsoft Office installation was detected." "%ROOT%\install-preflight-flow\broken-continue\run.out" >nul || ( echo [T22h] FAIL: BROKEN_OFFICE message missing & exit /b 1 )
+          findstr /c:"Generating configuration file" "%ROOT%\install-preflight-flow\broken-continue\run.out" >nul || ( echo [T22h] FAIL: install1 not reached & exit /b 1 )
+          echo [T22h] PASS broken-office-continue=config-created
+
+          :: Global safety assertions across every real option [1] scenario.
+          for %%C in (none target-return target-continue detection-error other-return other-continue broken-return broken-continue) do (
+            findstr /c:"Downloading setup.exe from Microsoft CDN" "%ROOT%\install-preflight-flow\%%C\run.out" >nul && ( echo [T22] FAIL: %%C reached network download & exit /b 1 )
+            if exist "%ROOT%\install-preflight-flow\%%C\setup.exe" ( echo [T22] FAIL: %%C setup.exe leaked & exit /b 1 )
+            if exist "%ROOT%\install-preflight-flow\%%C\setup.exe.download.tmp" ( echo [T22] FAIL: %%C temp download leaked & exit /b 1 )
+          )
+          set "_T22_STATE="
+          echo [T22] PASS all-five-states real-option-1-preflight no-network no-install no-activation
+          exit /b 0
 
       - name: Upload runtime-contract artifacts
         if: always()
