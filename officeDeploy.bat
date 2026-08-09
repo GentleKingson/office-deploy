@@ -293,7 +293,7 @@ if "!_activationExit!"=="0" (
     echo Microsoft Office is now permanently activated.
 ) else (
     echo Activation failed with error code !_activationExit!.
-    echo Review the Ohook messages above; running this option again may help.
+    echo Review the diagnostic, readiness, and Ohook messages above.
     set "_exitCode=70"
     set "_result=FAILED"
 )
@@ -312,17 +312,25 @@ set "nul2=2>nul"
 set "nul6=2^>nul"
 set "nul=>nul 2>&1"
 call :dk_setvar
+set "mas=https://massgrave.dev/"
+set "spp=SoftwareLicensingProduct"
+set "sps=SoftwareLicensingService"
 call :dk_reflection
 call :dk_ckeckwmic
 call :dk_product
+call :dk_sppissue
+:: Clear caller state once, immediately before the health checks. Errors raised
+:: from this point onward must survive to the final activation result.
+set "error="
 call :dk_showosinfo
+
+echo Initiating Diagnostic Tests...
+set "_serv=%_slser% Winmgmt"
+set "notwinact=1"
+set "ohookact=1"
+call :dk_errorcheck
+
 call :oh_setspp
-:: Reset `error` BEFORE the shared detector, then let the detector set
-:: error=1 if it finds a broken C2R install (files present but service
-:: gone). This matches MAS upstream ordering: reset, then detect, then
-:: carry any error through to the final result. A leftover error from a
-:: caller (e.g. [2] preflight) is also cleared here.
-set error=
 call :oh_check_supported_office
 :: Defense-in-depth fail-fast: if no supported Office was detected (also
 :: catches a C2R install whose ClickToRun service is gone, via the shared
@@ -333,6 +341,9 @@ if not defined o16c2r if not defined o15c2r if not defined o16msi if not defined
     echo No supported Microsoft Office was found to activate.
     exit /b 1
 )
+call :oh_detect_windows_server
+call :oh_wait_licensing_ready
+if errorlevel 1 exit /b 1
 echo:
 echo Activating Office...
 :: Process Office 16.0 C2R
@@ -713,6 +724,163 @@ if defined o15c2r if "%_ohSvcErr1%"=="1060" if "%_ohSvcErr2%"=="1060" (
 set "_ohSvcErr1="
 set "_ohSvcErr2="
 exit /b
+
+::  Establish the MAS Windows Server flag used by :oh_process.
+:oh_detect_windows_server
+set "winserver="
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\ProductOptions" /v ProductType %nul2% | find /i "WinNT" %nul1% || set "winserver=1"
+if not defined winserver (
+    reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v EditionID %nul2% | find /i "Server" %nul1% && set "winserver=1"
+)
+exit /b 0
+
+::  Wait until post-install licensing dependencies are usable. This is a
+::  bounded condition-based gate, not a fixed delay: an already-ready system
+::  continues immediately, while a fresh ODT install gets 12 five-second
+::  readiness intervals. Provider calls are independently bounded to 5 seconds.
+:oh_wait_licensing_ready
+set "_ohReadyAttempt=0"
+set "_ohReadyMax=12"
+set "_ohReadyMissing="
+set "_ohC2rStartAttempted="
+
+:oh_wait_licensing_ready_retry
+set /a _ohReadyAttempt+=1
+set "_ohReadyComponent="
+
+if defined o16c2r (
+    call :oh_ensure_c2r_service_ready ClickToRunSvc
+    set "_ohC2rStatus=!errorlevel!"
+    if "!_ohC2rStatus!"=="2" set "_ohReadyMissing=ClickToRunSvc (service not found)"
+    if "!_ohC2rStatus!"=="1" set "_ohReadyComponent=ClickToRunSvc"
+)
+if defined _ohReadyMissing goto oh_wait_licensing_ready_missing
+if defined o15c2r if not defined _ohReadyComponent (
+    call :oh_ensure_c2r_service_ready ClickToRunSvc OfficeSvc
+    set "_ohC2rStatus=!errorlevel!"
+    if "!_ohC2rStatus!"=="2" set "_ohReadyMissing=ClickToRunSvc or OfficeSvc (services not found)"
+    if "!_ohC2rStatus!"=="1" set "_ohReadyComponent=ClickToRunSvc or OfficeSvc"
+)
+if defined _ohReadyMissing goto oh_wait_licensing_ready_missing
+if not defined _ohReadyComponent (
+    sc query %_slser% | find /i "RUNNING" %nul% || set "_ohReadyComponent=Software Protection (%_slser%)"
+)
+if not defined _ohReadyComponent (
+    sc query Winmgmt | find /i "RUNNING" %nul% || set "_ohReadyComponent=Windows Management Instrumentation"
+)
+if not defined _ohReadyComponent (
+    call :oh_probe_licensing_provider
+    set "_ohReadyProbe=!errorlevel!"
+    if "!_ohReadyProbe!"=="10" set "_ohReadyComponent=SoftwareLicensingService"
+    if "!_ohReadyProbe!"=="20" set "_ohReadyComponent=RefreshLicenseStatus"
+    if not "!_ohReadyProbe!"=="0" if not defined _ohReadyComponent set "_ohReadyComponent=SoftwareLicensingService"
+)
+
+if not defined _ohReadyComponent goto oh_wait_licensing_ready_done
+if !_ohReadyAttempt! GTR !_ohReadyMax! goto oh_wait_licensing_ready_timeout
+echo Checking Licensing Readiness            [Waiting !_ohReadyAttempt!/!_ohReadyMax!: !_ohReadyComponent!]
+%psc% "Start-Sleep -Seconds 5" %nul%
+goto oh_wait_licensing_ready_retry
+
+:oh_wait_licensing_ready_done
+if defined o16c2r echo Checking ClickToRun Service             [Running]
+if not defined o16c2r if defined o15c2r echo Checking ClickToRun Service             [Running]
+echo Checking Software Protection            [Running]
+echo Checking WMI                            [Ready]
+echo Checking Licensing Provider             [Ready]
+echo Checking License Status Refresh         [Ready]
+set "_ohReadyAttempt="
+set "_ohReadyMax="
+set "_ohReadyMissing="
+set "_ohReadyProbe="
+set "_ohC2rStatus="
+set "_ohC2rStartAttempted="
+exit /b 0
+
+:oh_wait_licensing_ready_missing
+echo:
+call :dk_color %Red% "Licensing readiness failed."
+echo Component: !_ohReadyMissing!
+set "error=1"
+set "_ohReadyAttempt="
+set "_ohReadyMax="
+set "_ohReadyMissing="
+set "_ohReadyProbe="
+set "_ohReadyComponent="
+set "_ohC2rStatus="
+set "_ohC2rStartAttempted="
+exit /b 1
+
+:oh_wait_licensing_ready_timeout
+echo:
+call :dk_color %Red% "Licensing readiness timed out."
+echo Component: !_ohReadyComponent!
+set "error=1"
+set "_ohReadyAttempt="
+set "_ohReadyMax="
+set "_ohReadyMissing="
+set "_ohReadyProbe="
+set "_ohReadyComponent="
+set "_ohC2rStatus="
+set "_ohC2rStartAttempted="
+exit /b 1
+
+::  Return 0 when one candidate service is running, 1 when at least one exists
+::  but is still starting/stopped, and 2 when every candidate is missing. An
+::  existing stopped service is started once; subsequent calls only observe it.
+:oh_ensure_c2r_service_ready
+set "_ohC2rAnyExists="
+set "_ohC2rRunning="
+set "_ohC2rScError="
+
+for %%S in (%*) do (
+    sc query %%S %nul%
+    set "_ohC2rScError=!errorlevel!"
+    if not "!_ohC2rScError!"=="1060" (
+        set "_ohC2rAnyExists=1"
+        sc query %%S | find /i "RUNNING" %nul%
+        if !errorlevel! EQU 0 if not defined _ohC2rRunning set "_ohC2rRunning=%%S"
+    )
+)
+
+if defined _ohC2rRunning (
+    set "_ohC2rAnyExists="
+    set "_ohC2rRunning="
+    set "_ohC2rScError="
+    exit /b 0
+)
+if not defined _ohC2rAnyExists (
+    set "_ohC2rRunning="
+    set "_ohC2rScError="
+    exit /b 2
+)
+
+if not defined _ohC2rStartAttempted (
+    set "_ohC2rStartAttempted=1"
+    for %%S in (%*) do (
+        sc query %%S %nul%
+        if not "!errorlevel!"=="1060" sc start %%S %nul%
+    )
+    for %%S in (%*) do (
+        sc query %%S | find /i "RUNNING" %nul%
+        if !errorlevel! EQU 0 if not defined _ohC2rRunning set "_ohC2rRunning=%%S"
+    )
+)
+
+set "_ohC2rAnyExists="
+set "_ohC2rScError="
+if defined _ohC2rRunning (
+    set "_ohC2rRunning="
+    exit /b 0
+)
+set "_ohC2rRunning="
+exit /b 1
+
+::  Query and refresh through the licensing WMI provider in a bounded job.
+::  Return 10 for provider/query failures and 20 for refresh failures.
+:oh_probe_licensing_provider
+%psc% "$j=Start-Job { try { $s=Get-WmiObject -Class SoftwareLicensingService -ErrorAction Stop; if ($null -eq $s) { 10; return } } catch { 10; return }; try { $r=Invoke-WmiMethod -InputObject $s -Name RefreshLicenseStatus -ErrorAction Stop; if ($null -eq $r -or [int]($r.ReturnValue) -ne 0) { 20; return } } catch { 20; return }; 0 }; if (-not (Wait-Job $j -Timeout 5)) { Stop-Job $j; Remove-Job $j; exit 10 }; $r=@(Receive-Job $j); Remove-Job $j; if ($r.Count -eq 0) { exit 10 }; exit ([int]$r[-1])" %nul%
+exit /b !errorlevel!
 
 :oh_getpath
 
