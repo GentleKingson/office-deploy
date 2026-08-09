@@ -46,8 +46,8 @@ The interactive mode displays an action menu:
 [3] Exit
 ```
 
-- `[1] Install` performs the normal interactive Microsoft 365 installation flow.
-- `[2] Activate installed Office` only acts on Office that is already installed. It detects Office through the same MAS-derived detector the activation engine itself uses (`:oh_check_supported_office` → `:oh_getpath`, which requires the registry key **and** the Office marker file, both 32/64-bit aware, **plus** the upstream ClickToRun service validity check), then activates it by reusing the script's existing Ohook activation capability — the same implementation the `[1]` post-install path uses. It does not download or reinstall Office. Ohook is idempotent, so re-running `[2]` is safe; it reinstalls cleanly.
+- `[1] Install` performs the normal interactive Microsoft 365 installation flow, verifies the installed files, then enters the shared activation core. Before any product key or Ohook change, that core runs the MAS 3.10 licensing-health diagnostics and a bounded licensing-readiness gate.
+- `[2] Activate installed Office` only acts on Office that is already installed. It detects Office through the same MAS-derived detector the activation engine itself uses (`:oh_check_supported_office` → `:oh_getpath`, which requires the registry key **and** the Office marker file, both 32/64-bit aware, **plus** the upstream ClickToRun service validity check), then uses the same diagnostic, readiness, and Ohook core as `[1]`. It does not download or reinstall Office. Ohook is idempotent, so re-running `[2]` is safe; it reinstalls cleanly.
 
 > Both activation paths (`[1]` post-install and `[2]` Activate installed Office) share the repository's existing MAS-derived Ohook activation implementation. GitHub Actions does not execute Office activation.
 >
@@ -177,7 +177,13 @@ Install Microsoft 365 Apps
   ↓
 Verify installation
   ↓
-Legacy interactive post-install path
+MAS licensing-health diagnostics
+  ↓
+Detect Office and Windows Server
+  ↓
+Wait for ClickToRun / SPP / WMI readiness
+  ↓
+Ohook activation and cleanup
   ↓
 Exit
 ```
@@ -370,7 +376,10 @@ Coverage includes:
 - the repository blob line-ending contract: the exact bytes Git stores for `officeDeploy.bat` are asserted, byte-for-byte, to be CRLF (`T14`);
 - running that same blob end-to-end via `call` and asserting a clean config-only run, with no batch-control-flow-break signature (English and Chinese) in the output (`T15`/`T15b`);
 - interactive option `[1]` configuration-generation regression: the real `choice [1] -> ERRORLEVEL=1 -> :write_config` control flow is driven through the interactive menu and must generate a valid `Configuration.xml` without `CONFIG_WRITE_FAILED`, stopping before ODT / network / install (`T16`, instruments a test bat copy);
-- the `:write_config` ambient `ERRORLEVEL` contract: `:write_config` must succeed and emit a valid `Configuration.xml` regardless of any `ERRORLEVEL` inherited from its caller (`T16b`, instruments a test bat copy).
+- the `:write_config` ambient `ERRORLEVEL` contract: `:write_config` must succeed and emit a valid `Configuration.xml` regardless of any `ERRORLEVEL` inherited from its caller (`T16b`, instruments a test bat copy);
+- the activation-core ordering contract: the single early `error` reset, MAS 3.10 preflight, Office detection, Server detection, and licensing-readiness gate cannot be reordered or silently dropped (`T17`);
+- the licensing-readiness helper against the runners' real `sppsvc`, `Winmgmt`, `SoftwareLicensingService`, and `RefreshLicenseStatus`, plus a copied-script missing/stopped `ClickToRunSvc` timeout fixture that must fail before key or hook processing (`T18`);
+- Windows Server detection against the real Server 2022 and Server 2025 runner registry, which must establish `winserver=1` (`T19`).
 
 See:
 
@@ -391,7 +400,7 @@ The runtime workflow intentionally does **not**:
 - execute Ohook;
 - test ARM64 / `SysArm32`.
 
-`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. `T16` and `T16b` use the same copy-instrumentation approach — `T16` inserts a `goto finish` before the ODT download stage so the interactive `[1]` configuration-generation path can run without network or install, and `T16b` injects a probe dispatcher that calls `:write_config` directly with a poisoned ambient `ERRORLEVEL`. Activation itself stays outside the CI boundary.
+`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. `T13`, `T16`, `T16b`, `T18`, and `T19` use the same copy-instrumentation approach. `T18` directly exercises only the bounded service/provider readiness helper; it calls `RefreshLicenseStatus` but never installs a product key, installs Ohook, or enters a per-product activation routine. Activation itself stays outside the CI boundary.
 
 These belong to separate validation stages.
 
@@ -421,6 +430,7 @@ The deployment path includes several defensive controls:
 - network downloads use a temporary file;
 - ODT is validated before execution;
 - invalid cached ODT files are removed and recovered automatically;
+- post-install activation waits for ClickToRun, Software Protection, WMI, and the licensing provider before installing a key or modifying Ohook;
 - unattended execution returns deterministic failure codes;
 - CI runs with read-only repository permissions;
 - CI uses `pull_request`, not `pull_request_target`;
