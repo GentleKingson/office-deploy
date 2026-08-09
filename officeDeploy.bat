@@ -444,7 +444,23 @@ if defined isOspp (call :oh_hookinstall_ospp) else (call :oh_hookinstall)
 exit /b
 
 :write_config
+set "_configResult="
+set "_configWriteExit="
+set "_cfgSize="
+
 echo Generating configuration file...
+
+:: Do not inherit ERRORLEVEL from CHOICE or another caller. In interactive
+:: option [1], choice leaves ERRORLEVEL=1 live (set/goto/if do not reset it),
+:: the STAGE log call that would zero it is unattended-only, and a successful
+:: redirect block does not reset ERRORLEVEL either -- so the inherited value
+:: was misread as CONFIG_WRITE_FAILED. Reset the real error level right before
+:: the redirect whose result we capture. `set ERRORLEVEL=0` only shadows the
+:: dynamic value with a variable and is NOT a reset; `cmd /d /c exit 0` is
+:: (/d skips any AutoRun commands). This makes :write_config self-contained:
+:: its result depends only on this run's config write, never on the caller.
+cmd /d /c exit 0
+
 (
 echo ^<Configuration ID="2cd8f1d8-6b10-4233-96fd-3616bfa137cb"^>
 echo   ^<Add OfficeClientEdition="64" Channel="MonthlyEnterprise"^>
