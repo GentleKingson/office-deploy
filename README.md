@@ -366,7 +366,11 @@ Coverage includes:
 - native child `SCRIPT_PATH` preservation;
 - interactive menu rendering and Exit mapping (`T11`);
 - option `[2]` Office detection through the same MAS-derived detector the activation engine uses (`:oh_check_supported_office`), against mocked registry **and** Office marker files **and** the ClickToRun service: 64-bit Click-to-Run and 32-bit `Wow6432Node` MSI pass; registry-without-marker is rejected; registry+marker without the ClickToRun service is rejected (`T12`, instruments a test bat copy — no Ohook activation is executed);
-- the `:oh_activate_core` fail-fast guard, which must abort before the mutating cleanup routines when no supported Office is present (`T13`).
+- the `:oh_activate_core` fail-fast guard, which must abort before the mutating cleanup routines when no supported Office is present (`T13`);
+- the repository blob line-ending contract: the exact bytes Git stores for `officeDeploy.bat` are asserted, byte-for-byte, to be CRLF (`T14`);
+- running that same blob end-to-end via `call` and asserting a clean config-only run, with no batch-control-flow-break signature (English and Chinese) in the output (`T15`/`T15b`);
+- interactive option `[1]` configuration-generation regression: the real `choice [1] -> ERRORLEVEL=1 -> :write_config` control flow is driven through the interactive menu and must generate a valid `Configuration.xml` without `CONFIG_WRITE_FAILED`, stopping before ODT / network / install (`T16`, instruments a test bat copy);
+- the `:write_config` ambient `ERRORLEVEL` contract: `:write_config` must succeed and emit a valid `Configuration.xml` regardless of any `ERRORLEVEL` inherited from its caller (`T16b`, instruments a test bat copy).
 
 See:
 
@@ -387,7 +391,7 @@ The runtime workflow intentionally does **not**:
 - execute Ohook;
 - test ARM64 / `SysArm32`.
 
-`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. Activation itself stays outside the CI boundary.
+`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. `T16` and `T16b` use the same copy-instrumentation approach — `T16` inserts a `goto finish` before the ODT download stage so the interactive `[1]` configuration-generation path can run without network or install, and `T16b` injects a probe dispatcher that calls `:write_config` directly with a poisoned ambient `ERRORLEVEL`. Activation itself stays outside the CI boundary.
 
 These belong to separate validation stages.
 
