@@ -741,21 +741,27 @@ exit /b 0
 :oh_wait_licensing_ready
 set "_ohReadyAttempt=0"
 set "_ohReadyMax=12"
+set "_ohReadyMissing="
+set "_ohC2rStartAttempted="
 
 :oh_wait_licensing_ready_retry
 set /a _ohReadyAttempt+=1
 set "_ohReadyComponent="
 
 if defined o16c2r (
-    sc query ClickToRunSvc | find /i "RUNNING" %nul% || set "_ohReadyComponent=ClickToRunSvc"
+    call :oh_ensure_c2r_service_ready ClickToRunSvc
+    set "_ohC2rStatus=!errorlevel!"
+    if "!_ohC2rStatus!"=="2" set "_ohReadyMissing=ClickToRunSvc (service not found)"
+    if "!_ohC2rStatus!"=="1" set "_ohReadyComponent=ClickToRunSvc"
 )
+if defined _ohReadyMissing goto oh_wait_licensing_ready_missing
 if defined o15c2r if not defined _ohReadyComponent (
-    sc query ClickToRunSvc | find /i "RUNNING" %nul%
-    if !errorlevel! NEQ 0 (
-        sc query OfficeSvc | find /i "RUNNING" %nul%
-        if !errorlevel! NEQ 0 set "_ohReadyComponent=ClickToRunSvc or OfficeSvc"
-    )
+    call :oh_ensure_c2r_service_ready ClickToRunSvc OfficeSvc
+    set "_ohC2rStatus=!errorlevel!"
+    if "!_ohC2rStatus!"=="2" set "_ohReadyMissing=ClickToRunSvc or OfficeSvc (services not found)"
+    if "!_ohC2rStatus!"=="1" set "_ohReadyComponent=ClickToRunSvc or OfficeSvc"
 )
+if defined _ohReadyMissing goto oh_wait_licensing_ready_missing
 if not defined _ohReadyComponent (
     sc query %_slser% | find /i "RUNNING" %nul% || set "_ohReadyComponent=Software Protection (%_slser%)"
 )
@@ -785,8 +791,25 @@ echo Checking Licensing Provider             [Ready]
 echo Checking License Status Refresh         [Ready]
 set "_ohReadyAttempt="
 set "_ohReadyMax="
+set "_ohReadyMissing="
 set "_ohReadyProbe="
+set "_ohC2rStatus="
+set "_ohC2rStartAttempted="
 exit /b 0
+
+:oh_wait_licensing_ready_missing
+echo:
+call :dk_color %Red% "Licensing readiness failed."
+echo Component: !_ohReadyMissing!
+set "error=1"
+set "_ohReadyAttempt="
+set "_ohReadyMax="
+set "_ohReadyMissing="
+set "_ohReadyProbe="
+set "_ohReadyComponent="
+set "_ohC2rStatus="
+set "_ohC2rStartAttempted="
+exit /b 1
 
 :oh_wait_licensing_ready_timeout
 echo:
@@ -795,14 +818,68 @@ echo Component: !_ohReadyComponent!
 set "error=1"
 set "_ohReadyAttempt="
 set "_ohReadyMax="
+set "_ohReadyMissing="
 set "_ohReadyProbe="
 set "_ohReadyComponent="
+set "_ohC2rStatus="
+set "_ohC2rStartAttempted="
+exit /b 1
+
+::  Return 0 when one candidate service is running, 1 when at least one exists
+::  but is still starting/stopped, and 2 when every candidate is missing. An
+::  existing stopped service is started once; subsequent calls only observe it.
+:oh_ensure_c2r_service_ready
+set "_ohC2rAnyExists="
+set "_ohC2rRunning="
+set "_ohC2rScError="
+
+for %%S in (%*) do (
+    sc query %%S %nul%
+    set "_ohC2rScError=!errorlevel!"
+    if not "!_ohC2rScError!"=="1060" (
+        set "_ohC2rAnyExists=1"
+        sc query %%S | find /i "RUNNING" %nul%
+        if !errorlevel! EQU 0 if not defined _ohC2rRunning set "_ohC2rRunning=%%S"
+    )
+)
+
+if defined _ohC2rRunning (
+    set "_ohC2rAnyExists="
+    set "_ohC2rRunning="
+    set "_ohC2rScError="
+    exit /b 0
+)
+if not defined _ohC2rAnyExists (
+    set "_ohC2rRunning="
+    set "_ohC2rScError="
+    exit /b 2
+)
+
+if not defined _ohC2rStartAttempted (
+    set "_ohC2rStartAttempted=1"
+    for %%S in (%*) do (
+        sc query %%S %nul%
+        if not "!errorlevel!"=="1060" sc start %%S %nul%
+    )
+    for %%S in (%*) do (
+        sc query %%S | find /i "RUNNING" %nul%
+        if !errorlevel! EQU 0 if not defined _ohC2rRunning set "_ohC2rRunning=%%S"
+    )
+)
+
+set "_ohC2rAnyExists="
+set "_ohC2rScError="
+if defined _ohC2rRunning (
+    set "_ohC2rRunning="
+    exit /b 0
+)
+set "_ohC2rRunning="
 exit /b 1
 
 ::  Query and refresh through the licensing WMI provider in a bounded job.
 ::  Return 10 for provider/query failures and 20 for refresh failures.
 :oh_probe_licensing_provider
-%psc% "$j=Start-Job { try { $s=Get-WmiObject -Class SoftwareLicensingService -ErrorAction Stop; if ($null -eq $s) { 10; return } } catch { 10; return }; try { $null=$s.RefreshLicenseStatus(); 0 } catch { 20 } }; if (-not (Wait-Job $j -Timeout 5)) { Stop-Job $j; Remove-Job $j; exit 10 }; $r=@(Receive-Job $j); Remove-Job $j; if ($r.Count -eq 0) { exit 10 }; exit ([int]$r[-1])" %nul%
+%psc% "$j=Start-Job { try { $s=Get-WmiObject -Class SoftwareLicensingService -ErrorAction Stop; if ($null -eq $s) { 10; return } } catch { 10; return }; try { $r=Invoke-WmiMethod -InputObject $s -Name RefreshLicenseStatus -ErrorAction Stop; if ($null -eq $r -or [int]($r.ReturnValue) -ne 0) { 20; return } } catch { 20; return }; 0 }; if (-not (Wait-Job $j -Timeout 5)) { Stop-Job $j; Remove-Job $j; exit 10 }; $r=@(Receive-Job $j); Remove-Job $j; if ($r.Count -eq 0) { exit 10 }; exit ([int]$r[-1])" %nul%
 exit /b !errorlevel!
 
 :oh_getpath
