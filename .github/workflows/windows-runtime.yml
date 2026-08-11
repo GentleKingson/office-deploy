@@ -23,6 +23,9 @@ name: Windows Runtime CI
 # T21 directly exercises the read-only installation-preflight classifier;
 # T22 drives the real interactive option [1] menus with copied-script detector
 # fixtures and stops before ODT/network/install.
+# T23 statically locks the MAS 3.12 synchronization and local integration
+# order. T24 calls only :oh_extractdll in an instrumented copy and validates
+# the two temporary PE outputs; it never enters activation or cleanup.
 # T14 / T15 / T15b guard the line-ending contract of the distributed artifact.
 # T14 extracts the raw Git blob of officeDeploy.bat (exactly what an end user
 # downloads) and asserts, byte-for-byte, that every line ending is CRLF.
@@ -577,7 +580,7 @@ jobs:
           :: and would expand !o16c2r! to empty. So emit '!' as [char]33 and
           :: the variable name separately, assembling the string in PS so cmd
           :: never sees a literal '!'.
-          powershell -NoProfile -Command "$f='%ROOT%\activate-detect\probe.bat'; $nl=[char]13+[char]10; $x=[char]33; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $d1='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if defined _T12E_PROBE ( goto :t12e_probe )'+$nl+'@set masver=3.10'; $p1=':t12e_probe'+$nl+'set error='+$nl+'call :oh_check_supported_office'+$nl+'echo PROBE_o16c2r='+$x+'o16c2r'+$x+$nl+'echo PROBE_o16msi='+$x+'o16msi'+$x+$nl+'echo PROBE_error='+$x+'error'+$x+$nl+'exit /b 0'+$nl; if(-not $t.StartsWith($old)){exit 1}; $t=$d1 + $t.Substring($old.Length) + $nl + $p1; [IO.File]::WriteAllText($f,$t); exit 0"
+          powershell -NoProfile -Command "$f='%ROOT%\activate-detect\probe.bat'; $nl=[char]13+[char]10; $x=[char]33; $t=[IO.File]::ReadAllText($f); $m=[regex]::Match($t,'\A@set masver=[0-9.]+'); if(-not $m.Success){exit 1}; $old=$m.Value; $d1='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if defined _T12E_PROBE ( goto :t12e_probe )'+$nl+$old; $p1=':t12e_probe'+$nl+'set error='+$nl+'call :oh_check_supported_office'+$nl+'echo PROBE_o16c2r='+$x+'o16c2r'+$x+$nl+'echo PROBE_o16msi='+$x+'o16msi'+$x+$nl+'echo PROBE_error='+$x+'error'+$x+$nl+'exit /b 0'+$nl; $t=$d1 + $t.Substring($old.Length) + $nl + $p1; [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T12e] FAIL: probe injection failed & exit /b 1 )
 
           set "_T12E_PROBE=1"
@@ -630,15 +633,15 @@ jobs:
           :: shared :oh_check_supported_office clears every o* flag.
           for %%K in (HKLM\SOFTWARE\Microsoft\Office\ClickToRun HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun HKLM\SOFTWARE\Wow6432Node\Microsoft\Office\16.0\Common\InstallRoot HKLM\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot) do reg delete "%%K" /f >nul 2>nul
 
-          :: Instrument the COPY: replace the first line (@set masver=3.10)
+          :: Instrument the COPY: replace the version-independent first line
           :: with a RUN_CORE dispatcher + that same line. Uses the SAME
           :: proven PowerShell -replace pattern as T12 (double-quoted
           :: replacement string so `r`n becomes real CRLF). The dispatcher
           :: avoids cmd-expanded tokens: it checks _T13_RUN_CORE (set by the
           :: caller below) instead of %1, and uses goto :eof to propagate
-          :: the called label's errorlevel. Anchored on @set masver=3.10
-          :: (the unique first line) so the replacement is exact.
-          powershell -NoProfile -Command "$f='%ROOT%\core-failfast\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $old=\"@set masver=3.10\"; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif defined _T13_RUN_CORE ( call :oh_activate_core ^& goto :eof )`r`n@set masver=3.10\"; if(-not $t.StartsWith($old)){exit 1}; $t=$new + $t.Substring($old.Length); $t=$t.Replace('call :dk_sppissue','rem T13 dk_sppissue stub').Replace('call :dk_errorcheck','rem T13 dk_errorcheck stub'); [IO.File]::WriteAllText($f,$t); exit 0"
+          :: the called label's errorlevel. The anchored masver regex keeps the
+          :: instrumentation independent of future embedded Ohook versions.
+          powershell -NoProfile -Command "$f='%ROOT%\core-failfast\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $m=[regex]::Match($t,'\A@set masver=[0-9.]+'); if(-not $m.Success){exit 1}; $old=$m.Value; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif defined _T13_RUN_CORE ( call :oh_activate_core ^& goto :eof )`r`n\"+$old; $t=$new + $t.Substring($old.Length); $t=$t.Replace('call :dk_sppissue','rem T13 dk_sppissue stub').Replace('call :dk_errorcheck','rem T13 dk_errorcheck stub'); [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T13] FAIL: dispatcher injection failed & exit /b 1 )
 
           :: Drive core with _T13_RUN_CORE set.
@@ -880,13 +883,13 @@ jobs:
           findstr /c:"_T16B_PROBE" "officeDeploy.bat" >nul && ( echo [T16b] FAIL: probe present in production bat & exit /b 1 )
 
           :: Instrument the COPY: a top-level dispatcher (anchored on the
-          :: unique first line @set masver=3.10). When _T16B_PROBE is set it
+          :: unique first-line masver assignment). When _T16B_PROBE is set it
           :: sets _cfg/_displayLevel/_mode, poisons ERRORLEVEL to 7, calls
           :: :write_config, and returns its exit code via goto :eof. Each
           :: statement is on its own line (no ^& / no parens), so the set
           :: values take no trailing space and cmd parsing stays simple. The
           :: path is space-free, so no literal " is needed inside $new.
-          powershell -NoProfile -Command "$f='%ROOT%\wc-contract\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $old=\"@set masver=3.10\"; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif not defined _T16B_PROBE goto :t16b_done`r`nset _cfg=%ROOT%\wc-contract\Configuration.xml`r`nset _displayLevel=None`r`nset _mode=interactive`r`ncmd /d /c exit 7`r`ncall :write_config`r`ngoto :eof`r`n:t16b_done`r`n@set masver=3.10\"; if(-not $t.StartsWith($old)){exit 1}; $t=$new + $t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
+          powershell -NoProfile -Command "$f='%ROOT%\wc-contract\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $m=[regex]::Match($t,'\A@set masver=[0-9.]+'); if(-not $m.Success){exit 1}; $old=$m.Value; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif not defined _T16B_PROBE goto :t16b_done`r`nset _cfg=%ROOT%\wc-contract\Configuration.xml`r`nset _displayLevel=None`r`nset _mode=interactive`r`ncmd /d /c exit 7`r`ncall :write_config`r`ngoto :eof`r`n:t16b_done`r`n\"+$old; $t=$new + $t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T16b] FAIL: dispatcher injection failed & exit /b 1 )
 
           :: Drive the probe. goto :eof returns :write_config's exit code.
@@ -911,7 +914,7 @@ jobs:
       # ----------------------------------------------------------------------
       # T17: static activation-core contract. The full licensing diagnostics
       # are intentionally not executed by CI, so lock their exact production
-      # ordering here: one early error reset, MAS 3.10 preflight, shared Office
+      # ordering here: one early error reset, MAS preflight, shared Office
       # detection, Server detection, then the readiness gate. In particular,
       # no later reset may erase an error raised by :dk_errorcheck.
       # ----------------------------------------------------------------------
@@ -987,7 +990,7 @@ jobs:
 
           :: Add a copied-script dispatcher. The positive path below runs the
           :: production 12-attempt timing and production helper code.
-          powershell -NoProfile -Command "$f='%ROOT%\readiness\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif not defined _T18_PROBE goto :t18_done`r`ncall :dk_setvar`r`ncall :dk_ckeckwmic`r`ncall :oh_wait_licensing_ready`r`ngoto :eof`r`n:t18_done`r`n@set masver=3.10\"; if(-not $t.StartsWith($old)){exit 1}; $t=$new+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
+          powershell -NoProfile -Command "$f='%ROOT%\readiness\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $m=[regex]::Match($t,'\A@set masver=[0-9.]+'); if(-not $m.Success){exit 1}; $old=$m.Value; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif not defined _T18_PROBE goto :t18_done`r`ncall :dk_setvar`r`ncall :dk_ckeckwmic`r`ncall :oh_wait_licensing_ready`r`ngoto :eof`r`n:t18_done`r`n\"+$old; $t=$new+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T18] FAIL: instrumentation failed & exit /b 1 )
 
           set "SysPath=%SystemRoot%\System32"
@@ -1048,8 +1051,9 @@ jobs:
 
           $text = [IO.File]::ReadAllText($copy)
           if ($text.Contains('_T18_STATE_PROBE')) { throw '[T18c] FAIL: test seam present in production bat' }
-          $old = '@set masver=3.10'
-          if (-not $text.StartsWith($old)) { throw '[T18c] FAIL: dispatcher anchor missing' }
+          $versionMatch = [regex]::Match($text, '\A@set masver=[0-9.]+')
+          if (-not $versionMatch.Success) { throw '[T18c] FAIL: dispatcher anchor missing' }
+          $old = $versionMatch.Value
 
           foreach ($anchor in @(
             'sc query %%S | find /i "RUNNING" %nul%',
@@ -1084,7 +1088,6 @@ jobs:
           echo PROBE_START_COUNT=!_T18_START_COUNT!
           exit /b !_T18_RC!
           :t18_state_done
-          @set masver=3.10
           '@
 
           $stub = @'
@@ -1124,6 +1127,7 @@ jobs:
 
           $nl = "`r`n"
           $dispatcher = [regex]::Replace($dispatcher, '\r?\n', $nl)
+          $dispatcher = $dispatcher + $old + $nl
           $stub = [regex]::Replace($stub, '\r?\n', $nl)
           $text = $dispatcher + $text.Substring($old.Length) + $nl + $stub + $nl
           [IO.File]::WriteAllText($copy, $text)
@@ -1201,7 +1205,7 @@ jobs:
           copy /y "officeDeploy.bat" "%ROOT%\server-detect\officeDeploy.bat" >nul
           findstr /c:"_T19_PROBE" "officeDeploy.bat" >nul && ( echo [T19] FAIL: test seam present in production bat & exit /b 1 )
 
-          powershell -NoProfile -Command "$f='%ROOT%\server-detect\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif not defined _T19_PROBE goto :t19_done`r`ncall :oh_detect_windows_server`r`nif defined winserver (echo PROBE_winserver=1) else echo PROBE_winserver=`r`ngoto :eof`r`n:t19_done`r`n@set masver=3.10\"; if(-not $t.StartsWith($old)){exit 1}; $t=$new+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
+          powershell -NoProfile -Command "$f='%ROOT%\server-detect\officeDeploy.bat'; $t=[IO.File]::ReadAllText($f); $m=[regex]::Match($t,'\A@set masver=[0-9.]+'); if(-not $m.Success){exit 1}; $old=$m.Value; $new=\"@echo off`r`nsetlocal EnableExtensions EnableDelayedExpansion`r`nif not defined _T19_PROBE goto :t19_done`r`ncall :oh_detect_windows_server`r`nif defined winserver (echo PROBE_winserver=1) else echo PROBE_winserver=`r`ngoto :eof`r`n:t19_done`r`n\"+$old; $t=$new+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T19] FAIL: dispatcher injection failed & exit /b 1 )
 
           set "nul1=1>nul"
@@ -1232,7 +1236,9 @@ jobs:
           $text = [IO.File]::ReadAllText($copy)
           if ($text.Contains('_T20_PROBE')) { throw '[T20] FAIL: test seam present in production bat' }
 
-          $old = '@set masver=3.10'
+          $versionMatch = [regex]::Match($text, '\A@set masver=[0-9.]+')
+          if (-not $versionMatch.Success) { throw '[T20] FAIL: dispatcher anchor missing' }
+          $old = $versionMatch.Value
           foreach ($anchor in @(
             $old,
             'call :dk_sppissue',
@@ -1255,7 +1261,6 @@ jobs:
           call :oh_activate_core
           exit /b !errorlevel!
           :t20_done
-          @set masver=3.10
           '@
           $stub = @'
           :t20_readiness_fail
@@ -1264,6 +1269,7 @@ jobs:
           '@
           $nl = "`r`n"
           $dispatcher = [regex]::Replace($dispatcher, '\r?\n', $nl)
+          $dispatcher = $dispatcher + $old + $nl
           $stub = [regex]::Replace($stub, '\r?\n', $nl)
           $text = $dispatcher + $text.Substring($old.Length) + $nl + $stub + $nl
           [IO.File]::WriteAllText($copy, $text)
@@ -1325,7 +1331,7 @@ jobs:
           :: Inject a top-level dispatcher into the COPY. Literal ! characters
           :: are assembled inside PowerShell so this outer delayed-expansion
           :: block cannot consume the probe's runtime variable references.
-          powershell -NoProfile -Command "$f='%ROOT%\install-preflight-detect\officeDeploy.bat'; $nl=[char]13+[char]10; $x=[char]33; $t=[IO.File]::ReadAllText($f); $old='@set masver=3.10'; $d='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if not defined _T21_PROBE goto :t21_done'+$nl+'call :detect_office_install_state'+$nl+'set _t21rc='+$x+'errorlevel'+$x+$nl+'echo PROBE_OFFICE_STATE='+$x+'_officeState'+$x+$nl+'echo PROBE_TARGET_STATE='+$x+'_targetProbeState'+$x+$nl+'echo PROBE_TARGET_REASON='+$x+'_targetProbeReason'+$x+$nl+'echo PROBE_SUPPORTED_STATUS='+$x+'_supportedProbeResult'+$x+$nl+'exit /b '+$x+'_t21rc'+$x+$nl+':t21_done'+$nl+'@set masver=3.10'; if(-not $t.StartsWith($old)){exit 1}; $t=$d+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
+          powershell -NoProfile -Command "$f='%ROOT%\install-preflight-detect\officeDeploy.bat'; $nl=[char]13+[char]10; $x=[char]33; $t=[IO.File]::ReadAllText($f); $m=[regex]::Match($t,'\A@set masver=[0-9.]+'); if(-not $m.Success){exit 1}; $old=$m.Value; $d='@echo off'+$nl+'setlocal EnableExtensions EnableDelayedExpansion'+$nl+'if not defined _T21_PROBE goto :t21_done'+$nl+'call :detect_office_install_state'+$nl+'set _t21rc='+$x+'errorlevel'+$x+$nl+'echo PROBE_OFFICE_STATE='+$x+'_officeState'+$x+$nl+'echo PROBE_TARGET_STATE='+$x+'_targetProbeState'+$x+$nl+'echo PROBE_TARGET_REASON='+$x+'_targetProbeReason'+$x+$nl+'echo PROBE_SUPPORTED_STATUS='+$x+'_supportedProbeResult'+$x+$nl+'exit /b '+$x+'_t21rc'+$x+$nl+':t21_done'+$nl+$old; $t=$d+$t.Substring($old.Length); [IO.File]::WriteAllText($f,$t); exit 0"
           if !ERRORLEVEL! NEQ 0 ( echo [T21] FAIL: dispatcher injection failed & exit /b 1 )
           findstr /c:"_T21_PROBE" "officeDeploy.bat" >nul && ( echo [T21] FAIL: test seam present in production bat & exit /b 1 )
 
@@ -1587,6 +1593,215 @@ jobs:
           set "_T22_STATE="
           echo [T22] PASS all-five-states real-option-1-preflight no-network no-install no-activation
           exit /b 0
+
+      # ----------------------------------------------------------------------
+      # T23: static MAS 3.12 synchronization and Office Deploy integration
+      # contract. This reads production text only and performs no mutation.
+      # ----------------------------------------------------------------------
+      - name: T23 Ohook 3.12 static synchronization contract
+        shell: pwsh
+        run: |
+          $text = [IO.File]::ReadAllText((Join-Path $PWD 'officeDeploy.bat'))
+
+          function Assert-Contains([string]$Haystack, [string]$Needle, [string]$Message) {
+            if (-not $Haystack.Contains($Needle)) { throw "[T23] FAIL: $Message" }
+          }
+
+          function Assert-Ordered([string]$Haystack, [string[]]$Needles) {
+            $position = 0
+            foreach ($needle in $Needles) {
+              $next = $Haystack.IndexOf($needle, $position, [StringComparison]::Ordinal)
+              if ($next -lt 0) { throw "[T23] FAIL: missing/out-of-order core line: $needle" }
+              $position = $next + $needle.Length
+            }
+          }
+
+          if ($text -notmatch '\A@set masver=3\.12\r?\n') { throw '[T23] FAIL: masver is not 3.12' }
+
+          foreach ($forbidden in @(
+            'set exhook=',
+            '\BIN\%_hook%',
+            'Copying Custom sppc',
+            'Copying Custom %_hook%',
+            'GetRandomFileName'
+          )) {
+            if ($text.Contains($forbidden)) { throw "[T23] FAIL: removed Ohook 3.10 path remains: $forbidden" }
+          }
+
+          $extractMatch = [regex]::Match($text, '(?ms)^:oh_extractdll\r?\n.*?(?=^:hexedit:\r?$)')
+          if (-not $extractMatch.Success) { throw '[T23] FAIL: oh_extractdll boundaries not found' }
+          $extract = $extractMatch.Value
+          Assert-Contains $extract '[IO.File]::ReadAllText' 'oh_extractdll is not using [IO.File]'
+          if ($extract.Contains('[System.IO.File]')) { throw '[T23] FAIL: old fully qualified file API remains in oh_extractdll' }
+
+          $hexMatch = [regex]::Match($text, '(?ms)^:hexedit:\r?\n.*?^:hexedit:\r?$')
+          if (-not $hexMatch.Success) { throw '[T23] FAIL: hexedit boundaries not found' }
+          $hexedit = $hexMatch.Value
+          Assert-Contains $hexedit '[Guid]::NewGuid().Guid' 'hexedit GUID temporary name missing'
+          Assert-Contains $hexedit '[IO.File]::WriteAllBytes' 'hexedit is not using [IO.File]'
+          Assert-Contains $hexedit 'finally {' 'temporary PE cleanup hardening missing'
+
+          Assert-Contains $text '09865ea5993215965e8f27a74b8a41d15fd0f60f5f404cb7a8b3c7757acdab02 *sppc32.dll' 'sppc32 payload hash comment missing'
+          Assert-Contains $text '393a1fa26deb3663854e41f2b687c188a9eacd87b23f17ea09422c4715cb5a9f *sppc64.dll' 'sppc64 payload hash comment missing'
+          Assert-Contains $text ':oh_check_supported_office' 'supported Office detector missing'
+          Assert-Contains $text ':oh_wait_licensing_ready' 'licensing readiness helper missing'
+          Assert-Contains $text 'Upstream file commit: f34d025d5102a790c75c839c8d46b672284729a5' 'upstream commit provenance missing'
+          Assert-Contains $text 'Upstream file blob: cec64c62a39cb61254bf5d39091f399b6d1d4de7' 'upstream blob provenance missing'
+
+          foreach ($seam in @(
+            '_T12E_PROBE', '_T13_RUN_CORE', '_T16B_PROBE', '_T18_PROBE',
+            '_T18_STATE_PROBE', '_T19_PROBE', '_T20_PROBE', '_T21_PROBE',
+            '_T22_STATE', '_T23_PROBE', '_T24_PROBE'
+          )) {
+            if ($text.Contains($seam)) { throw "[T23] FAIL: CI-only seam present in production bat: $seam" }
+          }
+
+          $coreMatch = [regex]::Match($text, '(?ms)^:oh_activate_core\r?\n.*?(?=^::  Activate Office 16\.0 C2R)')
+          if (-not $coreMatch.Success) { throw '[T23] FAIL: activation core boundaries not found' }
+          $core = $coreMatch.Value
+          Assert-Ordered $core @(
+            'set "error="',
+            'call :dk_errorcheck',
+            'call :oh_setspp',
+            'call :oh_check_supported_office',
+            'call :oh_detect_windows_server',
+            'call :oh_wait_licensing_ready',
+            'call :oh_activate_o16c2r',
+            'call :oh_activate_o15c2r',
+            'call :oh_processmsi',
+            'call :oh_clearblock',
+            'call :oh_uninstkey',
+            'call :oh_licrefresh'
+          )
+          Assert-Contains $core 'if /i not "!_supportedProbeStatus!"=="SUPPORTED_PROBE_OK"' 'supported detector status guard missing'
+          Assert-Contains $core 'if errorlevel 1 exit /b 1' 'readiness fail-closed abort missing'
+
+          Write-Host '[T23] PASS mas-3.12 no-exhook io-file guid-temp payload-comments local-guards ordered-core no-ci-seam'
+
+      # ----------------------------------------------------------------------
+      # T24: decode both embedded payloads, then call the real :oh_extractdll
+      # label in an instrumented copy. Only runner-temp PE files are touched.
+      # ----------------------------------------------------------------------
+      - name: T24 Embedded Ohook payload extraction
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'office-deploy-tests\ohook-payload'
+          $copy = Join-Path $root 'officeDeploy.bat'
+          $out32 = Join-Path $root 'sppc32.dll'
+          $out64 = Join-Path $root 'sppc64.dll'
+          $bin = Join-Path $root 'BIN'
+
+          function Get-Sha256([byte[]]$Bytes) {
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+              return -join ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') })
+            } finally {
+              $sha.Dispose()
+            }
+          }
+
+          function Get-EmbeddedPayload([string]$Text, [string]$Name) {
+            $escaped = [regex]::Escape($Name)
+            $match = [regex]::Match($Text, "(?ms)^:${escaped}:\r?\n(.*?)^:${escaped}:\r?$")
+            if (-not $match.Success) { throw "[T24] FAIL: payload boundaries missing for $Name" }
+            $encoded = ($match.Groups[1].Value -replace '-', 'A' -replace '_', 'a') -replace '\s', ''
+            try {
+              return [Convert]::FromBase64String($encoded)
+            } catch {
+              throw "[T24] FAIL: invalid embedded Base64 for ${Name}: $($_.Exception.Message)"
+            }
+          }
+
+          function Assert-Pe([string]$Path, [int]$ExpectedMachine) {
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "[T24] FAIL: output missing: $Path" }
+            $bytes = [IO.File]::ReadAllBytes($Path)
+            if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw "[T24] FAIL: MZ header missing: $Path" }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($peOffset -lt 0x40 -or ($peOffset + 6) -gt $bytes.Length) { throw "[T24] FAIL: invalid PE offset: $Path" }
+            if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) { throw "[T24] FAIL: PE signature missing: $Path" }
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne $ExpectedMachine) { throw "[T24] FAIL: unexpected PE machine 0x$($machine.ToString('x4')): $Path" }
+
+            [int]$headerSum = 0
+            [int]$checkSum = 0
+            $result = [T24ImageHlp]::MapFileAndCheckSum($Path, [ref]$headerSum, [ref]$checkSum)
+            if ($result -ne 0) { throw "[T24] FAIL: MapFileAndCheckSum returned $result for $Path" }
+            if ($headerSum -ne $checkSum) { throw "[T24] FAIL: PE checksum mismatch for $Path (header=$headerSum computed=$checkSum)" }
+          }
+
+          Add-Type @'
+          using System.Runtime.InteropServices;
+          public static class T24ImageHlp {
+              [DllImport("imagehlp.dll", CharSet = CharSet.Auto)]
+              public static extern int MapFileAndCheckSum(string filename, out int headerSum, out int checkSum);
+          }
+          '@
+
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          try {
+            Copy-Item -LiteralPath 'officeDeploy.bat' -Destination $copy -Force
+            if (Test-Path -LiteralPath $bin) { throw '[T24] FAIL: BIN exists before extraction' }
+
+            $text = [IO.File]::ReadAllText($copy)
+            $expected = @{
+              'sppc32.dll' = '09865ea5993215965e8f27a74b8a41d15fd0f60f5f404cb7a8b3c7757acdab02'
+              'sppc64.dll' = '393a1fa26deb3663854e41f2b687c188a9eacd87b23f17ea09422c4715cb5a9f'
+            }
+            foreach ($name in $expected.Keys) {
+              $payload = Get-EmbeddedPayload $text $name
+              if ($payload.Length -ne 9216) { throw "[T24] FAIL: unexpected raw payload length for $name: $($payload.Length)" }
+              $actualHash = Get-Sha256 $payload
+              if ($actualHash -ne $expected[$name]) { throw "[T24] FAIL: raw payload hash mismatch for $name: $actualHash" }
+            }
+
+            $versionMatch = [regex]::Match($text, '\A@set masver=[0-9.]+')
+            if (-not $versionMatch.Success) { throw '[T24] FAIL: dispatcher anchor missing' }
+            $versionLine = $versionMatch.Value
+          $dispatcher = @'
+          @echo off
+          setlocal EnableExtensions EnableDelayedExpansion
+          if not defined _T24_PROBE goto :t24_done
+          set "SysPath=%SystemRoot%\System32"
+          set "psc=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command"
+          set "nul1=1>nul"
+          set "nul2=2>nul"
+          set "_batp=%~f0"
+          set "_batp=!_batp:'=''!"
+          set "hasherror="
+          set "_hook=sppc32.dll"
+          call :oh_extractdll "%_T24_OUT32%" "2564"
+          set "_hook=sppc64.dll"
+          call :oh_extractdll "%_T24_OUT64%" "3076"
+          if defined hasherror exit /b 1
+          if not exist "%_T24_OUT32%" exit /b 1
+          if not exist "%_T24_OUT64%" exit /b 1
+          exit /b 0
+          :t24_done
+          '@
+            $nl = "`r`n"
+            $dispatcher = [regex]::Replace($dispatcher, '\r?\n', $nl) + $versionLine + $nl
+            $text = $dispatcher + $text.Substring($versionLine.Length)
+            [IO.File]::WriteAllText($copy, $text)
+
+            $env:_T24_PROBE = '1'
+            $env:_T24_OUT32 = $out32
+            $env:_T24_OUT64 = $out64
+            $command = 'call "' + $copy + '"'
+            & $env:ComSpec /d /c $command
+            $rc = $LASTEXITCODE
+            if ($rc -ne 0) { throw "[T24] FAIL: oh_extractdll dispatcher returned $rc" }
+
+            Assert-Pe $out32 0x014c
+            Assert-Pe $out64 0x8664
+            if (Test-Path -LiteralPath $bin) { throw '[T24] FAIL: extraction created or used a BIN directory' }
+
+            Write-Host '[T24] PASS raw-hashes actual-extract mz-pe checksum no-bin no-activation'
+          } finally {
+            Remove-Item Env:_T24_PROBE -ErrorAction SilentlyContinue
+            Remove-Item Env:_T24_OUT32 -ErrorAction SilentlyContinue
+            Remove-Item Env:_T24_OUT64 -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Upload runtime-contract artifacts
         if: always()
