@@ -46,7 +46,7 @@ Office Deploy retains ownership of:
 - the bounded licensing-readiness gate;
 - the no-Office mutation guard and CI safety boundary.
 
-The MAS standalone argument, elevation, QuickEdit, and `_cmdf` startup state machines are intentionally not embedded. The legacy `BIN\sppc32.dll` / `BIN\sppc64.dll` override has also been removed: hook installation always extracts the pinned in-script payload. Office Deploy adds one explicit hardening deviation to the MAS 3.12 PE writer by using `try`/`finally` cleanup for its GUID-named temporary PE.
+The MAS standalone argument, elevation, QuickEdit, and `_cmdf` startup state machines are intentionally not embedded. The legacy `BIN\sppc32.dll` / `BIN\sppc64.dll` override has also been removed: hook installation always extracts the pinned in-script payload. Office Deploy adds two explicit local hardening deviations: `try`/`finally` cleanup for the MAS 3.12 PE writer's GUID-named temporary file, and an exact activation-ID/product-key check that avoids reinstalling an already-present generic key during repeat runs.
 
 At this pin, `:ohookdata` and `:msiofficedata` match the MAS 3.12 source label-for-label. The decoded embedded payloads remain 9,216 bytes each and have these SHA-256 values:
 
@@ -433,7 +433,7 @@ Coverage includes:
 - activation-core fail-closed behavior: a copied core with forced readiness failure must return non-zero before product processing, Generic Key installation, Ohook installation, or license cleanup (`T20`);
 - the installation-preflight detector state machine against mocked registry, marker-file, application-file, service, architecture, incomplete-install, unavailable-PowerShell, and broad-detector operational-failure fixtures (`T21`);
 - the real interactive option `[1]` preflight control flow: `NONE` continues; `TARGET_INSTALLED`, `OTHER_OFFICE`, and `BROKEN_OFFICE` exercise their Return/Continue mappings; and `DETECTION_ERROR` cannot silently enter installation (`T22`, instruments a test bat copy and stops before ODT/network/install);
-- the MAS 3.12 static synchronization contract: removed external-hook paths, `[IO.File]` usage, GUID temporary naming, provenance, payload hash comments, local helper presence, activation-core ordering, and absence of production CI seams (`T23`);
+- the MAS 3.12 static synchronization contract: removed external-hook paths, `[IO.File]` usage, GUID temporary naming, provenance, payload hash comments, local helper presence, activation-core ordering, repeat-run exact-key guard, and absence of production CI seams (`T23`);
 - both raw embedded payload hashes and the real `:oh_extractdll` output in a copied script, including MZ/PE structure, architecture, final PE checksum, dynamically observed GUID temporary PE cleanup, and absence of `BIN` use (`T24`).
 
 See:

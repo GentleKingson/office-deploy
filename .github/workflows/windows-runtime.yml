@@ -1676,7 +1676,21 @@ jobs:
           Assert-Contains $core 'if /i not "!_supportedProbeStatus!"=="SUPPORTED_PROBE_OK"' 'supported detector status guard missing'
           Assert-Contains $core 'if errorlevel 1 exit /b 1' 'readiness fail-closed abort missing'
 
-          Write-Host '[T23] PASS mas-3.12 no-exhook io-file guid-temp payload-comments local-guards ordered-core no-ci-seam'
+          $keyMatch = [regex]::Match($text, '(?ms)^:dk_inskey\r?\n.*?(?=^::  Get all products Activation IDs)')
+          if (-not $keyMatch.Success) { throw '[T23] FAIL: dk_inskey boundaries not found' }
+          $keyInstall = $keyMatch.Value
+          Assert-Contains $keyInstall 'set "_keytail=%key:~-5%"' 'repeat-run key-tail guard missing'
+          Assert-Contains $keyInstall "ID='%_actid%' and PartialProductKey='%_keytail%'" 'WMIC exact-key query missing'
+          Assert-Contains $keyInstall "ID=''%_actid%'' AND PartialProductKey=''%_keytail%''" 'PowerShell exact-key query missing'
+          Assert-Ordered $keyInstall @(
+            'set "_keyalready="',
+            'PartialProductKey=',
+            'if defined _keyalready (',
+            'InstallProductKey'
+          )
+          Assert-Contains $keyInstall '[Already installed]' 'repeat-run already-installed success result missing'
+
+          Write-Host '[T23] PASS mas-3.12 no-exhook io-file guid-temp payload-comments local-guards ordered-core repeat-key-guard no-ci-seam'
 
       # ----------------------------------------------------------------------
       # T24: decode both embedded payloads, then call the real :oh_extractdll
