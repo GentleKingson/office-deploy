@@ -434,7 +434,7 @@ Coverage includes:
 - the installation-preflight detector state machine against mocked registry, marker-file, application-file, service, architecture, incomplete-install, unavailable-PowerShell, and broad-detector operational-failure fixtures (`T21`);
 - the real interactive option `[1]` preflight control flow: `NONE` continues; `TARGET_INSTALLED`, `OTHER_OFFICE`, and `BROKEN_OFFICE` exercise their Return/Continue mappings; and `DETECTION_ERROR` cannot silently enter installation (`T22`, instruments a test bat copy and stops before ODT/network/install);
 - the MAS 3.12 static synchronization contract: removed external-hook paths, `[IO.File]` usage, GUID temporary naming, provenance, payload hash comments, local helper presence, activation-core ordering, and absence of production CI seams (`T23`);
-- both raw embedded payload hashes and the real `:oh_extractdll` output in a copied script, including MZ/PE structure, architecture, final PE checksum, temporary cleanup, and absence of `BIN` use (`T24`).
+- both raw embedded payload hashes and the real `:oh_extractdll` output in a copied script, including MZ/PE structure, architecture, final PE checksum, dynamically observed GUID temporary PE cleanup, and absence of `BIN` use (`T24`).
 
 See:
 

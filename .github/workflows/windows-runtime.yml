@@ -1689,6 +1689,7 @@ jobs:
           $copy = Join-Path $root 'officeDeploy.bat'
           $out32 = Join-Path $root 'sppc32.dll'
           $out64 = Join-Path $root 'sppc64.dll'
+          $manifest = Join-Path $root 'hexedit-temp-paths.txt'
           $bin = Join-Path $root 'BIN'
 
           function Get-Sha256([byte[]]$Bytes) {
@@ -1749,14 +1750,23 @@ jobs:
             }
             foreach ($name in $expected.Keys) {
               $payload = Get-EmbeddedPayload $text $name
-              if ($payload.Length -ne 9216) { throw "[T24] FAIL: unexpected raw payload length for $name: $($payload.Length)" }
+              if ($payload.Length -ne 9216) { throw "[T24] FAIL: unexpected raw payload length for ${name}: $($payload.Length)" }
               $actualHash = Get-Sha256 $payload
-              if ($actualHash -ne $expected[$name]) { throw "[T24] FAIL: raw payload hash mismatch for $name: $actualHash" }
+              if ($actualHash -ne $expected[$name]) { throw "[T24] FAIL: raw payload hash mismatch for ${name}: $actualHash" }
             }
 
             $versionMatch = [regex]::Match($text, '\A@set masver=[0-9.]+')
             if (-not $versionMatch.Success) { throw '[T24] FAIL: dispatcher anchor missing' }
             $versionLine = $versionMatch.Value
+            $nl = "`r`n"
+
+            # Instrument only the copied BAT to record each GUID temporary PE
+            # path. The real hexedit cleanup still creates and removes the file.
+            $tempPathAnchor = '$tempFilePath = "$env:windir\Temp\$([Guid]::NewGuid().Guid)"'
+            $tempPathAnchorCount = ([regex]::Matches($text, [regex]::Escape($tempPathAnchor))).Count
+            if ($tempPathAnchorCount -ne 1) { throw "[T24] FAIL: expected one GUID temp-path anchor, found $tempPathAnchorCount" }
+            $tempPathRecorder = '[IO.File]::AppendAllText($env:_T24_TEMP_MANIFEST, $tempFilePath + [Environment]::NewLine)'
+            $text = $text.Replace($tempPathAnchor, $tempPathAnchor + $nl + $tempPathRecorder)
           $dispatcher = @'
           @echo off
           setlocal EnableExtensions EnableDelayedExpansion
@@ -1778,7 +1788,6 @@ jobs:
           exit /b 0
           :t24_done
           '@
-            $nl = "`r`n"
             $dispatcher = [regex]::Replace($dispatcher, '\r?\n', $nl) + $versionLine + $nl
             $text = $dispatcher + $text.Substring($versionLine.Length)
             [IO.File]::WriteAllText($copy, $text)
@@ -1786,6 +1795,7 @@ jobs:
             $env:_T24_PROBE = '1'
             $env:_T24_OUT32 = $out32
             $env:_T24_OUT64 = $out64
+            $env:_T24_TEMP_MANIFEST = $manifest
             $command = 'call "' + $copy + '"'
             & $env:ComSpec /d /c $command
             $rc = $LASTEXITCODE
@@ -1793,13 +1803,27 @@ jobs:
 
             Assert-Pe $out32 0x014c
             Assert-Pe $out64 0x8664
+            if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw '[T24] FAIL: GUID temporary PE manifest missing' }
+            $tempPaths = @(Get-Content -LiteralPath $manifest | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($tempPaths.Count -ne 2) { throw "[T24] FAIL: expected two GUID temporary PE paths, found $($tempPaths.Count)" }
+            $uniqueTempPaths = @($tempPaths | Sort-Object -Unique)
+            if ($uniqueTempPaths.Count -ne 2) { throw '[T24] FAIL: GUID temporary PE paths were not unique' }
+            $expectedTempDir = [IO.Path]::GetFullPath((Join-Path $env:windir 'Temp')).TrimEnd([IO.Path]::DirectorySeparatorChar)
+            foreach ($tempPath in $uniqueTempPaths) {
+              $tempDir = [IO.Path]::GetDirectoryName($tempPath).TrimEnd([IO.Path]::DirectorySeparatorChar)
+              $tempName = [IO.Path]::GetFileName($tempPath)
+              if (-not [string]::Equals($tempDir, $expectedTempDir, [StringComparison]::OrdinalIgnoreCase)) { throw "[T24] FAIL: temporary PE was outside Windows Temp: $tempPath" }
+              if ($tempName -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { throw "[T24] FAIL: temporary PE name was not a GUID: $tempName" }
+              if (Test-Path -LiteralPath $tempPath) { throw "[T24] FAIL: GUID temporary PE was not removed: $tempPath" }
+            }
             if (Test-Path -LiteralPath $bin) { throw '[T24] FAIL: extraction created or used a BIN directory' }
 
-            Write-Host '[T24] PASS raw-hashes actual-extract mz-pe checksum no-bin no-activation'
+            Write-Host '[T24] PASS raw-hashes actual-extract mz-pe checksum guid-temp-cleanup no-bin no-activation'
           } finally {
             Remove-Item Env:_T24_PROBE -ErrorAction SilentlyContinue
             Remove-Item Env:_T24_OUT32 -ErrorAction SilentlyContinue
             Remove-Item Env:_T24_OUT64 -ErrorAction SilentlyContinue
+            Remove-Item Env:_T24_TEMP_MANIFEST -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
           }
 
