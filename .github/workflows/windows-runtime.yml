@@ -1680,14 +1680,19 @@ jobs:
           if (-not $keyMatch.Success) { throw '[T23] FAIL: dk_inskey boundaries not found' }
           $keyInstall = $keyMatch.Value
           Assert-Contains $keyInstall 'set "_keytail=%key:~-5%"' 'repeat-run key-tail guard missing'
-          Assert-Contains $keyInstall 'wmic path %spp% get PartialProductKey /VALUE' 'WMIC installed-key enumeration missing'
-          Assert-Contains $keyInstall "SELECT PartialProductKey FROM %spp% WHERE PartialProductKey IS NOT NULL" 'PowerShell installed-key enumeration missing'
+          Assert-Contains $keyInstall 'set "_keyappid=0ff1ce15-a989-479d-af46-f275c6370663"' 'Office application ID guard missing'
+          Assert-Contains $keyInstall 'if "%oVer%"=="14" set "_keyappid=59a52881-a989-479d-af46-f275c6370663"' 'Office 14 application ID guard missing'
+          Assert-Contains $keyInstall "wmic path %spp% where (ApplicationID='%_keyappid%') get PartialProductKey /VALUE" 'WMIC Office-key enumeration missing'
+          Assert-Contains $keyInstall "SELECT PartialProductKey FROM %spp% WHERE ApplicationID=''%_keyappid%'' AND PartialProductKey IS NOT NULL" 'PowerShell Office-key enumeration missing'
           Assert-Ordered $keyInstall @(
-            'set "_keyalready="',
-            'PartialProductKey',
+            'call :dk_keyinstalled',
             'if defined _keyalready (',
-            'InstallProductKey'
+            'InstallProductKey',
+            'if not !keyerror! EQU 0 (',
+            'call :dk_keyinstalled',
+            'if defined _keyalready set keyerror=0'
           )
+          if ([regex]::Matches($keyInstall, [regex]::Escape('call :dk_keyinstalled')).Count -ne 2) { throw '[T23] FAIL: repeat-run key guard must run before install and after a failed install' }
           Assert-Contains $keyInstall '[Already installed]' 'repeat-run already-installed success result missing'
 
           Write-Host '[T23] PASS mas-3.12 no-exhook io-file guid-temp payload-comments local-guards ordered-core repeat-key-guard no-ci-seam'

@@ -1919,10 +1919,10 @@ exit /b
 :dk_inskey
 
 ::  Local repeat-run guard: some providers reject reinstalling the same key with 0x80070005.
-set "_keyalready="
 set "_keytail=%key:~-5%"
-if %_wmic% EQU 1 for /f "tokens=2 delims==" %%a in ('"wmic path %spp% get PartialProductKey /VALUE" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
-if %_wmic% EQU 0 for /f "delims=" %%a in ('%psc% "(([WMISEARCHER]'SELECT PartialProductKey FROM %spp% WHERE PartialProductKey IS NOT NULL').Get()).PartialProductKey" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
+set "_keyappid=0ff1ce15-a989-479d-af46-f275c6370663"
+if "%oVer%"=="14" set "_keyappid=59a52881-a989-479d-af46-f275c6370663"
+call :dk_keyinstalled
 
 if defined _keyalready (
 set keyerror=0
@@ -1930,6 +1930,10 @@ set keyerror=0
 if %_wmic% EQU 1 wmic path %sps% where __CLASS='%sps%' call InstallProductKey ProductKey="%key%" %nul%
 if %_wmic% EQU 0 %psc% "try { $null=(([WMISEARCHER]'SELECT Version FROM %sps%').Get()).InstallProductKey('%key%'); exit 0 } catch { exit $_.Exception.InnerException.HResult }" %nul%
 set keyerror=!errorlevel!
+if not !keyerror! EQU 0 (
+call :dk_keyinstalled
+if defined _keyalready set keyerror=0
+)
 )
 cmd /c exit /b %keyerror%
 if %keyerror% NEQ 0 set "keyerror=[0x%=ExitCode%]"
@@ -1952,6 +1956,14 @@ set error=1
 set generickey=
 set "_keyalready="
 set "_keytail="
+set "_keyappid="
+exit /b
+
+:dk_keyinstalled
+
+set "_keyalready="
+if %_wmic% EQU 1 for /f "tokens=2 delims==" %%a in ('"wmic path %spp% where (ApplicationID='%_keyappid%') get PartialProductKey /VALUE" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
+if %_wmic% EQU 0 for /f "delims=" %%a in ('%psc% "(([WMISEARCHER]'SELECT PartialProductKey FROM %spp% WHERE ApplicationID=''%_keyappid%'' AND PartialProductKey IS NOT NULL').Get()).PartialProductKey" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
 exit /b
 
 ::  Get all products Activation IDs
