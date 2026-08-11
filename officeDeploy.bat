@@ -1,4 +1,4 @@
-@set masver=3.10
+@set masver=3.12
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 title Microsoft Office Deployment Utility
@@ -1296,7 +1296,7 @@ for %%# in ("!_oLPath!\%_License%*.xrm-ms") do (
 if defined _arr (set "_arr=!_arr!;"!_oLPath!\%%~nx#"") else (set "_arr="!_oLPath!\%%~nx#"")
 )
 
-%psc% "$sls = Get-WmiObject %sps%; $f=[System.IO.File]::ReadAllText('!_batp!') -split ':xrm\:.*';. ([scriptblock]::Create($f[1])); InstallLicenseArr '!_arr!'; InstallLicenseFile '"!_oLPath!\pkeyconfig-office.xrm-ms"'" %nul%
+%psc% "$sls = Get-WmiObject %sps%; $f=[IO.File]::ReadAllText('!_batp!') -split ':xrm\:.*';. ([scriptblock]::Create($f[1])); InstallLicenseArr '!_arr!'; InstallLicenseFile '"!_oLPath!\pkeyconfig-office.xrm-ms"'" %nul%
 
 call :dk_actids 0ff1ce15-a989-479d-af46-f275c6370663
 echo "!allapps!" | find /i "!_actid!" %nul1% || (
@@ -1336,17 +1336,8 @@ set ierror=mklink sppcs.dll
 goto :oh_hookinstall_error
 )
 
-set exhook=
-if exist "!_work!\BIN\%_hook%" set exhook=1
-
 if not exist "%_hookPath%\sppc.dll" (
-if defined exhook (
-pushd "!_work!\BIN\"
-copy /y /b "%_hook%" "%_hookPath%\sppc.dll" %nul%
-popd
-) else (
 call :oh_extractdll "%_hookPath%\sppc.dll" "%offset%"
-)
 )
 if not exist "%_hookPath%\sppc.dll" (
 set ierror=Copy
@@ -1355,11 +1346,7 @@ goto :oh_hookinstall_error
 
 echo:
 echo Symlinking System's sppc.dll            ["%_hookPath%\sppcs.dll"] [Successful]
-if defined exhook (
-echo Copying Custom %_hook% to            ["%_hookPath%\sppc.dll"] [Successful]
-) else (
 echo Extracting Custom %_hook% to         ["%_hookPath%\sppc.dll"] [Successful]
-)
 
 goto :oh_hookinstall_error
 
@@ -1425,18 +1412,8 @@ set ierror=mklink sppcs.dll
 goto :oh_hookinstall_error
 )
 
-set exhook=
-if exist "!_work!\BIN\%_hook68%" if exist "!_work!\BIN\%_hook86%"  set exhook=1
-
-if defined exhook (
-pushd "!_work!\BIN\"
-if defined _osppPath68 (copy /y /b "%_hook68%" "%_osppPath68%\OSPPC.DLL" %nul%)
-if defined _osppPath86 (copy /y /b "%_hook86%" "%_osppPath86%\OSPPC.DLL" %nul%)
-popd
-) else (
 if defined _osppPath68 (set _hook=%_hook68%&call :oh_extractdll "%_osppPath68%\OSPPC.DLL" "%offset68%")
 if defined _osppPath86 (set _hook=%_hook86%&call :oh_extractdll "%_osppPath86%\OSPPC.DLL" "%offset86%")
-)
 
 if defined _osppPath68 (if not exist "%_osppPath68%\OSPPC.DLL" set ierror=1)
 if defined _osppPath86 (if not exist "%_osppPath86%\OSPPC.DLL" set ierror=1)
@@ -1449,13 +1426,8 @@ goto :oh_hookinstall_error
 echo:
 if defined _osppPath68 (echo Renaming OSPPC.DLL to sppcs.dll         ["%_osppPath68%\sppcs.dll"])
 if defined _osppPath86 (echo Renaming OSPPC.DLL to sppcs.dll         ["%_osppPath86%\sppcs.dll"])
-if defined exhook (
-if defined _osppPath68 (echo Copying Custom %_hook68% to            ["%_osppPath68%\OSPPC.DLL"])
-if defined _osppPath86 (echo Copying Custom %_hook86% to            ["%_osppPath86%\OSPPC.DLL"])
-) else (
 if defined _osppPath68 (echo Extracting Custom %_hook68% to         ["%_osppPath68%\OSPPC.DLL"])
 if defined _osppPath86 (echo Extracting Custom %_hook86% to         ["%_osppPath86%\OSPPC.DLL"])
-)
 
 echo Symlinking Renamed sppcs.dll            ["%_hookPath%\sppcs.dll"]
 
@@ -1478,7 +1450,7 @@ if /i "%ierror%"=="Copy" call :dk_color %Blue% "If you are using any third-party
 echo:
 )
 
-if not defined exhook if not defined ierror (
+if not defined ierror (
 if defined hasherror (
 set error=1
 set ierror=1
@@ -1827,8 +1799,8 @@ exit /b
 :oh_licrefresh
 
 if exist "%SysPath%\spp\store_test\2.0\tokens.dat" (
-%psc% "Stop-Service sppsvc -force; $sls = Get-WmiObject SoftwareLicensingService; $f=[System.IO.File]::ReadAllText('!_batp!') -split ':xrm\:.*';. ([scriptblock]::Create($f[1])); ReinstallLicenses" %nul%
-if !errorlevel! NEQ 0 %psc% "$sls = Get-WmiObject SoftwareLicensingService; $f=[System.IO.File]::ReadAllText('!_batp!') -split ':xrm\:.*';. ([scriptblock]::Create($f[1])); ReinstallLicenses" %nul%
+%psc% "Stop-Service sppsvc -force; $sls = Get-WmiObject SoftwareLicensingService; $f=[IO.File]::ReadAllText('!_batp!') -split ':xrm\:.*';. ([scriptblock]::Create($f[1])); ReinstallLicenses" %nul%
+if !errorlevel! NEQ 0 %psc% "$sls = Get-WmiObject SoftwareLicensingService; $f=[IO.File]::ReadAllText('!_batp!') -split ':xrm\:.*';. ([scriptblock]::Create($f[1])); ReinstallLicenses" %nul%
 )
 exit /b
 
@@ -2106,19 +2078,19 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\taskcache\
 set hcount=0
 for %%# in (avira.com kaspersky.com virustotal.com mcafee.com) do (
 find /i "%%#" %SysPath%\drivers\etc\hosts %nul% && set /a hcount+=1)
-if %hcount%==4 set "results=[Antivirus URLs are blocked in hosts]"
+if %hcount%==4 set "results=Antivirus URLs blocked in hosts file"
 
 sc start %_slser% %nul%
 echo "%errorlevel%" | findstr "577 225" %nul% && (
-set "results=%results%[Likely File Infector]"
+set "results=%results%Likely File Infector"
 ) || (
 if not exist %SysPath%\%_slexe% if not exist %SysPath%\alg.exe (set "results=%results%[Likely File Infector]")
 )
 
 if not "%results%%pupfound%"=="" (
-if defined pupfound call :dk_color %Gray% "Checking PUP Activators                 [Found%pupfound%]"
-if defined results call :dk_color %Red% "Checking Probable Mal%w%ware Infection..."
-if defined results (call :dk_color %Red% "%results%"&set showfix=1)
+if defined pupfound call :dk_color %Gray% "Checking PUP Activators                 [%pupfound%]"
+if defined results call :dk_color %Red% "Checking for Mal%w%ware Infection...     [%results%]"
+call :dk_color %Gray% "It is highly likely that your Windows install is infected with mal%w%ware. Windows cannot be activated."
 set fixes=%fixes% %mas%remove_mal%w%ware
 call :dk_color2 %Blue% "Check this webpage for help - " %_Yellow% " %mas%remove_mal%w%ware"
 echo:
@@ -2479,7 +2451,7 @@ set showfix=1
 
 set chkalp=
 set wpainfo=NotFound
-for /f "delims=" %%a in ('%psc% "$f=[System.IO.File]::ReadAllText('!_batp!') -split ':wpatest\:.*';. ([scriptblock]::Create($f[1]))" %nul6%') do (set wpainfo=%%a)
+for /f "delims=" %%a in ('%psc% "$f=[IO.File]::ReadAllText('!_batp!') -split ':wpatest\:.*';. ([scriptblock]::Create($f[1]))" %nul6%') do (set wpainfo=%%a)
 for /f "delims=0123456789" %%i in ("%wpainfo%") do set chkalp=%%i
 
 if defined chkalp (
@@ -2553,7 +2525,7 @@ set showfix=1
 call :dk_actid 55c92734-d682-4d71-983e-d6ec3f16059f
 
 if not defined apps (
-%psc% "if (-not $env:_vis) {Start-Job { Stop-Service %_slser% -force } | Wait-Job -Timeout 20 | Out-Null}; $sls = Get-WmiObject SoftwareLicensingService; $f=[System.IO.File]::ReadAllText('!_batp!') -split ':xrm\:.*';. ([scriptblock]::Create($f[1])); ReinstallLicenses" %nul%
+%psc% "if (-not $env:_vis) {Start-Job { Stop-Service %_slser% -force } | Wait-Job -Timeout 20 | Out-Null}; $sls = Get-WmiObject SoftwareLicensingService; $f=[IO.File]::ReadAllText('!_batp!') -split ':xrm\:.*';. ([scriptblock]::Create($f[1])); ReinstallLicenses" %nul%
 if not defined _vis if !errorlevel! NEQ 0 set rlicfailed=1
 call :dk_actid 55c92734-d682-4d71-983e-d6ec3f16059f
 )
@@ -2835,7 +2807,7 @@ if %_unattended%==1 timeout /t 2 & exit /b
 
 if defined fixes (
 call :dk_color %White% "Follow ALL the ABOVE blue lines.   "
-call :dk_color2 %Blue% "Press [1] to Open Support Webpage " %Gray% " Press [0] to Ignore"
+call :dk_color2 %Blue% "Press [1] to Open Support Webpage " %Gray% " Press [0] to Go Back"
 choice /C:10 /N
 if !errorlevel!==2 exit /b
 if !errorlevel!==1 (start %selfgit% & start %github% & for %%# in (%fixes%) do (start %%#))
@@ -3333,7 +3305,7 @@ exit /b
 :oh_extractdll
 
 set b=
-%psc% "$f=[System.IO.File]::ReadAllText('!_batp!') -split ':%_hook%\:.*';$encoded = ($f[1]) -replace '-', 'A' -replace '_', 'a';$bytes = [Con%b%vert]::FromBas%b%e64String($encoded); $PePath='%1'; $offset='%2'; $m=[System.IO.File]::ReadAllText('!_batp!') -split ':hexedit\:.*';. ([scriptblock]::Create($m[1]))" %nul2% | find /i "Error found" %nul1% && set hasherror=1
+%psc% "$f=[IO.File]::ReadAllText('!_batp!') -split ':%_hook%\:.*';$encoded = ($f[1]) -replace '-', 'A' -replace '_', 'a';$bytes = [Con%b%vert]::FromBas%b%e64String($encoded); $PePath='%1'; $offset='%2'; $m=[IO.File]::ReadAllText('!_batp!') -split ':hexedit\:.*';. ([scriptblock]::Create($m[1]))" %nul2% | find /i "Error found" %nul1% && set hasherror=1
 exit /b
 
 :hexedit:
@@ -3372,31 +3344,33 @@ $Writer.Write($unixTimestamp)
 $Writer.Flush()
 
 # Write the current state of the MemoryStream to a temporary file
-$tempFilePath = "$env:windir\Temp\$([System.IO.Path]::GetRandomFileName())"
-[System.IO.File]::WriteAllBytes($tempFilePath, $MemoryStream.ToArray())
+$tempFilePath = "$env:windir\Temp\$([Guid]::NewGuid().Guid)"
+try {
+    [IO.File]::WriteAllBytes($tempFilePath, $MemoryStream.ToArray())
 
-# Update hash using the temporary file
-[int]$HeaderSum = 0
-[int]$CheckSum = 0
-[void]$Imagehlp::MapFileAndCheckSum($tempFilePath, [ref]$HeaderSum, [ref]$CheckSum)
+    # Update hash using the temporary file
+    [int]$HeaderSum = 0
+    [int]$CheckSum = 0
+    [void]$Imagehlp::MapFileAndCheckSum($tempFilePath, [ref]$HeaderSum, [ref]$CheckSum)
 
-# If the checksums don't match, update the checksum in the MemoryStream
-if ($HeaderSum -ne $CheckSum) {
-    $Writer.BaseStream.Position = $checkSumOffset
-    $Writer.Write($CheckSum)
-    $Writer.Flush()
-} else {
-    Write-host Error found
+    # If the checksums don't match, update the checksum in the MemoryStream
+    if ($HeaderSum -ne $CheckSum) {
+        $Writer.BaseStream.Position = $checkSumOffset
+        $Writer.Write($CheckSum)
+        $Writer.Flush()
+    } else {
+        Write-host Error found
+    }
+} finally {
+    # Office Deploy hardening: never leave the temporary PE behind on failure.
+    Remove-Item -LiteralPath $tempFilePath -Force -ErrorAction SilentlyContinue
 }
-
-# Delete the temporary file
-Remove-Item -Path $tempFilePath -Force
 
 # Get the modified bytes
 $modifiedBytes = $MemoryStream.ToArray()
 
 # Write the modified bytes to the final file
-[System.IO.File]::WriteAllBytes($PePath, $modifiedBytes)
+[IO.File]::WriteAllBytes($PePath, $modifiedBytes)
 
 [void]$Imagehlp::MapFileAndCheckSum($PePath, [ref]$HeaderSum, [ref]$CheckSum)
 if ($HeaderSum -ne $CheckSum) {
@@ -3423,12 +3397,6 @@ $MemoryStream.Close()
 ::  Here you can check how to extract sppc.dll files from base64
 ::
 ::  For any further question, feel free to contact us on mass{}grave{dot}dev/contactus
-::
-::========================================================================================================================================
-::
-::  If you want to use a different sppc.dll or without base64 format, then create a folder named "BIN" where this script is located and 
-::  place these two files in that "BIN" folder. sppc32.dll, sppc64.dll
-::  Script will auto pick that instead of using the below from base64 section. You can also delete the below code in that case.
 ::
 ::========================================================================================================================================
 ::
