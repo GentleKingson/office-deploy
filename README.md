@@ -27,6 +27,34 @@ The project focuses on:
 
 The project is intentionally kept as a **single primary Batch file** so it remains easy to copy, inspect, and run without an additional runtime or package manager.
 
+## Embedded Ohook Baseline
+
+**Embedded Ohook core synchronized with MAS 3.12, with Office Deploy integration changes.**
+
+| Item | Pinned value |
+|---|---|
+| Embedded Ohook version | MAS 3.12 |
+| Upstream file commit | [`f34d025d5102a790c75c839c8d46b672284729a5`](https://github.com/massgravel/Microsoft-Activation-Scripts/blob/f34d025d5102a790c75c839c8d46b672284729a5/MAS/Separate-Files-Version/Activators/Ohook_Activation_AIO.cmd) |
+| Upstream file blob | `cec64c62a39cb61254bf5d39091f399b6d1d4de7` |
+| Local integration base | `d109bef1bde90eb2004927b5a6e6358eb0db4de2` |
+
+Office Deploy retains ownership of:
+
+- its CLI, menu, and native-process relaunch contract;
+- the interactive installation preflight;
+- the fail-closed supported-Office detector;
+- the bounded licensing-readiness gate;
+- the no-Office mutation guard and CI safety boundary.
+
+The MAS standalone argument, elevation, QuickEdit, and `_cmdf` startup state machines are intentionally not embedded. The legacy `BIN\sppc32.dll` / `BIN\sppc64.dll` override has also been removed: hook installation always extracts the pinned in-script payload. Office Deploy adds two explicit local hardening deviations: `try`/`finally` cleanup for the MAS 3.12 PE writer's GUID-named temporary file, and an Office application key check before installation and after a failed installation so an already-present generic key does not turn a repeat run into a provider-specific `0x80070005` failure. The WMIC result is compared by its five-character key tail because `/VALUE` can expose an extra carriage return to `for /f` on supported Windows Server builds.
+
+At this pin, `:ohookdata` and `:msiofficedata` match the MAS 3.12 source label-for-label. The decoded embedded payloads remain 9,216 bytes each and have these SHA-256 values:
+
+| Payload | SHA-256 |
+|---|---|
+| `sppc32.dll` | `09865ea5993215965e8f27a74b8a41d15fd0f60f5f404cb7a8b3c7757acdab02` |
+| `sppc64.dll` | `393a1fa26deb3663854e41f2b687c188a9eacd87b23f17ea09422c4715cb5a9f` |
+
 ---
 
 ## Quick Start
@@ -47,7 +75,7 @@ The interactive mode displays an action menu:
 [3] Exit
 ```
 
-- `[1] Install` first performs a read-only Office installation preflight. It uses the same exact `O365ProPlusRetail` x64 product/file probe as post-install verification and the same broader supported-Office detector as activation. If the target Microsoft 365 Apps for enterprise installation already exists, the utility reports its detected version and platform and asks whether to return or continue deployment. Other or incomplete Office installations produce an explicit warning; a detector failure stops before configuration generation. Continuing performs the normal interactive installation flow, verifies the installed files, then enters the shared activation core. Before any product key or Ohook change, that core runs the MAS 3.10 licensing-health diagnostics and a bounded licensing-readiness gate.
+- `[1] Install` first performs a read-only Office installation preflight. It uses the same exact `O365ProPlusRetail` x64 product/file probe as post-install verification and the same broader supported-Office detector as activation. If the target Microsoft 365 Apps for enterprise installation already exists, the utility reports its detected version and platform and asks whether to return or continue deployment. Other or incomplete Office installations produce an explicit warning; a detector failure stops before configuration generation. Continuing performs the normal interactive installation flow, verifies the installed files, then enters the shared activation core. Before any product key or Ohook change, that core runs the MAS 3.12 licensing-health diagnostics and a bounded licensing-readiness gate.
 - `[2] Activate installed Office` only acts on Office that is already installed. It detects Office through the same MAS-derived detector the activation engine itself uses (`:oh_check_supported_office` → `:oh_getpath`, which requires the registry key **and** the Office marker file, both 32/64-bit aware, **plus** the upstream ClickToRun service validity check), then uses the same diagnostic, readiness, and Ohook core as `[1]`. It does not download or reinstall Office. Ohook is idempotent, so re-running `[2]` is safe; it reinstalls cleanly.
 
 > Both activation paths (`[1]` post-install and `[2]` Activate installed Office) share the repository's existing MAS-derived Ohook activation implementation. GitHub Actions does not execute Office activation.
@@ -372,7 +400,7 @@ The workflow runs on:
 | Windows Server 2022 | ✅ |
 | Windows Server 2025 | ✅ |
 
-The runtime suite validates the Batch control flow without downloading ODT or installing Microsoft 365.
+The runtime suite validates contracts `T1` through `T24` without downloading ODT or installing Microsoft 365.
 
 Coverage includes:
 
@@ -398,13 +426,15 @@ Coverage includes:
 - running that same blob end-to-end via `call` and asserting a clean config-only run, with no batch-control-flow-break signature (English and Chinese) in the output (`T15`/`T15b`);
 - interactive option `[1]` configuration-generation regression: the real `choice [1] -> preflight NONE -> :write_config` control flow is driven through the interactive menu and must generate a valid `Configuration.xml` without `CONFIG_WRITE_FAILED`, stopping before ODT / network / install (`T16`, instruments a test bat copy with a deterministic `NONE` detector result);
 - the `:write_config` ambient `ERRORLEVEL` contract: `:write_config` must succeed and emit a valid `Configuration.xml` regardless of any `ERRORLEVEL` inherited from its caller (`T16b`, instruments a test bat copy);
-- the activation-core ordering contract: the single early `error` reset, MAS 3.10 preflight, Office detection, Server detection, and the immediately adjacent `readiness call -> non-zero abort` contract cannot be reordered or silently dropped (`T17`);
+- the activation-core ordering contract: the single early `error` reset, MAS 3.12 preflight, Office detection, Server detection, and the immediately adjacent `readiness call -> non-zero abort` contract cannot be reordered or silently dropped (`T17`);
 - the licensing provider against the runners' real `sppsvc`, `Winmgmt`, `SoftwareLicensingService`, and `RefreshLicenseStatus`, plus a copied-script non-zero `RefreshLicenseStatus.ReturnValue` fixture (`T18`);
 - the C2R service state machine in a fully stubbed test copy: missing service fails immediately, stopped service is started once and succeeds, an unstartable service fails within the bound, and Office 15 accepts a running `OfficeSvc` fallback (`T18c`);
 - Windows Server detection against the real Server 2022 and Server 2025 runner registry, which must establish `winserver=1` (`T19`);
 - activation-core fail-closed behavior: a copied core with forced readiness failure must return non-zero before product processing, Generic Key installation, Ohook installation, or license cleanup (`T20`);
 - the installation-preflight detector state machine against mocked registry, marker-file, application-file, service, architecture, incomplete-install, unavailable-PowerShell, and broad-detector operational-failure fixtures (`T21`);
-- the real interactive option `[1]` preflight control flow: `NONE` continues; `TARGET_INSTALLED`, `OTHER_OFFICE`, and `BROKEN_OFFICE` exercise their Return/Continue mappings; and `DETECTION_ERROR` cannot silently enter installation (`T22`, instruments a test bat copy and stops before ODT/network/install).
+- the real interactive option `[1]` preflight control flow: `NONE` continues; `TARGET_INSTALLED`, `OTHER_OFFICE`, and `BROKEN_OFFICE` exercise their Return/Continue mappings; and `DETECTION_ERROR` cannot silently enter installation (`T22`, instruments a test bat copy and stops before ODT/network/install);
+- the MAS 3.12 static synchronization contract: removed external-hook paths, `[IO.File]` usage, GUID temporary naming, provenance, payload hash comments, local helper presence, activation-core ordering, repeat-run exact-key guard, and absence of production CI seams (`T23`);
+- both raw embedded payload hashes and the real `:oh_extractdll` output in a copied script, including MZ/PE structure, architecture, final PE checksum, dynamically observed GUID temporary PE cleanup, and absence of `BIN` use (`T24`).
 
 See:
 
@@ -422,10 +452,12 @@ The runtime workflow intentionally does **not**:
 - execute `setup.exe /configure`;
 - install Microsoft 365;
 - execute Office product activation or licensing mutation;
-- execute Ohook;
+- execute Ohook activation or install a hook into an Office directory;
 - test ARM64 / `SysArm32`.
 
-`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. `T13`, `T16`, `T16b`, `T18`, `T18c`, `T19`, `T20`, `T21`, and `T22` use the same copy-instrumentation approach. `T21` directly drives the combined installation-preflight classifier; `T22` drives the real option `[1]` menus and configuration path with deterministic detector states and a stop before ODT. `T18` directly exercises the bounded provider readiness helper and calls the real `RefreshLicenseStatus`; its negative fixture preserves the real provider query but substitutes a non-zero method result. `T18c` stubs all service/provider behavior. `T20` enters the copied activation core with mutating diagnostics stubbed and readiness forced to fail, proving that no product, key, hook, or cleanup routine is reached. Real Office installation and activation stay outside the CI boundary.
+`T12` exercises option `[2]` only up to the point where Ohook would be invoked. There is no test seam in the production script: CI instruments a **copied** bat at runtime to make the Ohook call unreachable, then drives the read-only `:oh_check_supported_office` detector against mocked fixtures. `T13`, `T16`, `T16b`, `T18`, `T18c`, `T19`, `T20`, `T21`, `T22`, and `T24` use the same copy-instrumentation approach. `T21` directly drives the combined installation-preflight classifier; `T22` drives the real option `[1]` menus and configuration path with deterministic detector states and a stop before ODT. `T18` directly exercises the bounded provider readiness helper and calls the real `RefreshLicenseStatus`; its negative fixture preserves the real provider query but substitutes a non-zero method result. `T18c` stubs all service/provider behavior. `T20` enters the copied activation core with mutating diagnostics stubbed and readiness forced to fail, proving that no product, key, hook, or cleanup routine is reached. `T23` is static-only. `T24` calls only `:oh_extractdll` and writes only runner-temporary PE files. Real Office installation and activation stay outside the CI boundary.
+
+Actual C2R/MSI activation, repeat-run behavior, and ARM64 / `SysArm32` remain independent Windows VM acceptance tests and are required before merging an Ohook baseline upgrade. They are never moved onto GitHub-hosted runners.
 
 These belong to separate validation stages.
 
