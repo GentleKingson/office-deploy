@@ -1684,6 +1684,8 @@ jobs:
           Assert-Contains $keyInstall 'if "%oVer%"=="14" set "_keyappid=59a52881-a989-479d-af46-f275c6370663"' 'Office 14 application ID guard missing'
           Assert-Contains $keyInstall "wmic path %spp% where (ApplicationID='%_keyappid%') get PartialProductKey /VALUE" 'WMIC Office-key enumeration missing'
           Assert-Contains $keyInstall "SELECT PartialProductKey FROM %spp% WHERE ApplicationID=''%_keyappid%'' AND PartialProductKey IS NOT NULL" 'PowerShell Office-key enumeration missing'
+          Assert-Contains $keyInstall 'if /i "!_keycandidate:~0,5!"=="%_keytail%" set "_keyalready=1"' 'installed-key normalization missing'
+          if ([regex]::Matches($keyInstall, [regex]::Escape('!_keycandidate:~0,5!')).Count -ne 2) { throw '[T23] FAIL: both installed-key providers must trim trailing output characters' }
           Assert-Ordered $keyInstall @(
             'call :dk_keyinstalled',
             'if defined _keyalready (',

@@ -1962,8 +1962,16 @@ exit /b
 :dk_keyinstalled
 
 set "_keyalready="
-if %_wmic% EQU 1 for /f "tokens=2 delims==" %%a in ('"wmic path %spp% where (ApplicationID='%_keyappid%') get PartialProductKey /VALUE" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
-if %_wmic% EQU 0 for /f "delims=" %%a in ('%psc% "(([WMISEARCHER]'SELECT PartialProductKey FROM %spp% WHERE ApplicationID=''%_keyappid%'' AND PartialProductKey IS NOT NULL').Get()).PartialProductKey" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
+set "_keycandidate="
+if %_wmic% EQU 1 for /f "tokens=2 delims==" %%a in ('"wmic path %spp% where (ApplicationID='%_keyappid%') get PartialProductKey /VALUE" %nul6%') do (
+set "_keycandidate=%%a"
+if /i "!_keycandidate:~0,5!"=="%_keytail%" set "_keyalready=1"
+)
+if %_wmic% EQU 0 for /f "delims=" %%a in ('%psc% "(([WMISEARCHER]'SELECT PartialProductKey FROM %spp% WHERE ApplicationID=''%_keyappid%'' AND PartialProductKey IS NOT NULL').Get()).PartialProductKey" %nul6%') do (
+set "_keycandidate=%%a"
+if /i "!_keycandidate:~0,5!"=="%_keytail%" set "_keyalready=1"
+)
+set "_keycandidate="
 exit /b
 
 ::  Get all products Activation IDs

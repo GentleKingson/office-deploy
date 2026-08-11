@@ -46,7 +46,7 @@ Office Deploy retains ownership of:
 - the bounded licensing-readiness gate;
 - the no-Office mutation guard and CI safety boundary.
 
-The MAS standalone argument, elevation, QuickEdit, and `_cmdf` startup state machines are intentionally not embedded. The legacy `BIN\sppc32.dll` / `BIN\sppc64.dll` override has also been removed: hook installation always extracts the pinned in-script payload. Office Deploy adds two explicit local hardening deviations: `try`/`finally` cleanup for the MAS 3.12 PE writer's GUID-named temporary file, and an Office application key check before installation and after a failed installation so an already-present generic key does not turn a repeat run into a provider-specific `0x80070005` failure.
+The MAS standalone argument, elevation, QuickEdit, and `_cmdf` startup state machines are intentionally not embedded. The legacy `BIN\sppc32.dll` / `BIN\sppc64.dll` override has also been removed: hook installation always extracts the pinned in-script payload. Office Deploy adds two explicit local hardening deviations: `try`/`finally` cleanup for the MAS 3.12 PE writer's GUID-named temporary file, and an Office application key check before installation and after a failed installation so an already-present generic key does not turn a repeat run into a provider-specific `0x80070005` failure. The WMIC result is compared by its five-character key tail because `/VALUE` can expose an extra carriage return to `for /f` on supported Windows Server builds.
 
 At this pin, `:ohookdata` and `:msiofficedata` match the MAS 3.12 source label-for-label. The decoded embedded payloads remain 9,216 bytes each and have these SHA-256 values:
 
