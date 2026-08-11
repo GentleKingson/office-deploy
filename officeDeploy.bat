@@ -1921,10 +1921,8 @@ exit /b
 ::  Local repeat-run guard: some providers reject reinstalling the same key with 0x80070005.
 set "_keyalready="
 set "_keytail=%key:~-5%"
-set "_keyappid=0ff1ce15-a989-479d-af46-f275c6370663"
-if "%oVer%"=="14" set "_keyappid=59a52881-a989-479d-af46-f275c6370663"
-if %_wmic% EQU 1 for /f "tokens=2 delims==" %%a in ('"wmic path %spp% where (ApplicationID='%_keyappid%' and PartialProductKey='%_keytail%') get PartialProductKey /VALUE" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
-if %_wmic% EQU 0 for /f "delims=" %%a in ('%psc% "(([WMISEARCHER]'SELECT PartialProductKey FROM %spp% WHERE ApplicationID=''%_keyappid%'' AND PartialProductKey=''%_keytail%''').Get()).PartialProductKey" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
+if %_wmic% EQU 1 for /f "tokens=2 delims==" %%a in ('"wmic path %spp% get PartialProductKey /VALUE" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
+if %_wmic% EQU 0 for /f "delims=" %%a in ('%psc% "(([WMISEARCHER]'SELECT PartialProductKey FROM %spp% WHERE PartialProductKey IS NOT NULL').Get()).PartialProductKey" %nul6%') do if /i "%%a"=="%_keytail%" set "_keyalready=1"
 
 if defined _keyalready (
 set keyerror=0
@@ -1954,7 +1952,6 @@ set error=1
 set generickey=
 set "_keyalready="
 set "_keytail="
-set "_keyappid="
 exit /b
 
 ::  Get all products Activation IDs

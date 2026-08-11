@@ -1680,13 +1680,11 @@ jobs:
           if (-not $keyMatch.Success) { throw '[T23] FAIL: dk_inskey boundaries not found' }
           $keyInstall = $keyMatch.Value
           Assert-Contains $keyInstall 'set "_keytail=%key:~-5%"' 'repeat-run key-tail guard missing'
-          Assert-Contains $keyInstall 'set "_keyappid=0ff1ce15-a989-479d-af46-f275c6370663"' 'Office 15/16 application ID guard missing'
-          Assert-Contains $keyInstall 'set "_keyappid=59a52881-a989-479d-af46-f275c6370663"' 'Office 14 application ID guard missing'
-          Assert-Contains $keyInstall "ApplicationID='%_keyappid%' and PartialProductKey='%_keytail%'" 'WMIC exact-key query missing'
-          Assert-Contains $keyInstall "ApplicationID=''%_keyappid%'' AND PartialProductKey=''%_keytail%''" 'PowerShell exact-key query missing'
+          Assert-Contains $keyInstall 'wmic path %spp% get PartialProductKey /VALUE' 'WMIC installed-key enumeration missing'
+          Assert-Contains $keyInstall "SELECT PartialProductKey FROM %spp% WHERE PartialProductKey IS NOT NULL" 'PowerShell installed-key enumeration missing'
           Assert-Ordered $keyInstall @(
             'set "_keyalready="',
-            'ApplicationID=',
+            'PartialProductKey',
             'if defined _keyalready (',
             'InstallProductKey'
           )
