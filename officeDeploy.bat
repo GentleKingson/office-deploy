@@ -399,6 +399,10 @@ if "!_activationExit!"=="0" (
 )
 goto finish
 
+:: Embedded Ohook core synchronized with MAS 3.12, with Office Deploy integration changes.
+:: Upstream file commit: f34d025d5102a790c75c839c8d46b672284729a5
+:: Upstream file blob: cec64c62a39cb61254bf5d39091f399b6d1d4de7
+:: Local integration base: d109bef1bde90eb2004927b5a6e6358eb0db4de2
 :oh_activate_core
 :: Set script path variables needed by Ohook functions
 set "_batf=%~f0"
